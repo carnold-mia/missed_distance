@@ -321,7 +321,10 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
     ))
 
     # --- Layout ----------------------------------------------------
+    # autosize=True + no fixed width/height = Plotly fills whatever
+    # container the browser gives it (critical for Notion embeds).
     fig.update_layout(
+        autosize=True,
         title=dict(
             text=f'{title}<br>'
                  '<sup>Click-drag to rotate · Scroll to zoom · Hover for details</sup>',
@@ -334,6 +337,7 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
                        showbackground=True, backgroundcolor='rgba(240,240,240,0.4)'),
             zaxis=dict(title='Z — Top/Bottom (m)',
                        showbackground=True, backgroundcolor='rgba(240,240,240,0.4)'),
+            # Reserve right margin for the colorbar by capping the scene at 88% width
             domain=dict(x=[0.0, 0.88], y=[0.0, 1.0]),
             aspectmode='manual',
             aspectratio=dict(x=ASP, y=1, z=1),
@@ -348,8 +352,8 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
         legend=dict(x=0.01, y=0.95,
                     bgcolor='rgba(255,255,255,0.85)',
                     bordercolor='#cccccc', borderwidth=1),
+        # Right margin keeps the colorbar visible; top margin gives title room
         margin=dict(l=0, r=140, b=0, t=80),
-        width=1600, height=750,
     )
     return fig
 
@@ -376,7 +380,27 @@ VERSIONS = [
 for df_v, filename, title in VERSIONS:
     fig = build_figure(df_v, title)
     out_path = os.path.join(FIGURES_DIR, filename)
-    fig.write_html(out_path, include_plotlyjs='cdn', full_html=True)
+    # responsive=True tells Plotly JS to resize on window resize events,
+    # which is essential for Notion's iframe to fill correctly.
+    # The post_script injects CSS that makes html/body/the plotly div
+    # fill 100% of the iframe viewport so there is no dead white space.
+    fig.write_html(
+        out_path,
+        include_plotlyjs='cdn',
+        full_html=True,
+        config={'responsive': True},
+        post_script=(
+            "document.documentElement.style.height='100%';"
+            "document.body.style.height='100%';"
+            "document.body.style.margin='0';"
+            "var divs=document.querySelectorAll('.plotly-graph-div');"
+            "divs.forEach(function(d){"
+            "  d.style.width='100%';"
+            "  d.style.height='100vh';"
+            "});"
+            "window.dispatchEvent(new Event('resize'));"
+        ),
+    )
     print(f"[INFO] Saved → {filename}  ({os.path.getsize(out_path) / 1024:.0f} KB)")
 
 print()
