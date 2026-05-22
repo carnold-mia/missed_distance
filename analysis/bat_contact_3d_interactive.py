@@ -390,13 +390,16 @@ for df_v, filename, title in VERSIONS:
         full_html=True,
         config={'responsive': True},
         post_script=(
-            "document.documentElement.style.height='100%';"
-            "document.body.style.height='100%';"
-            "document.body.style.margin='0';"
+            # Force the page and plotly div to fill the full iframe viewport.
+            # min-height ensures a usable size even in small default embeds;
+            # 100vh fills larger ones when the user drags the block taller.
+            "document.documentElement.style.cssText='height:100%;margin:0;padding:0;';"
+            "document.body.style.cssText='height:100%;margin:0;padding:0;background:#fff;';"
             "var divs=document.querySelectorAll('.plotly-graph-div');"
             "divs.forEach(function(d){"
             "  d.style.width='100%';"
             "  d.style.height='100vh';"
+            "  d.style.minHeight='800px';"
             "});"
             "window.dispatchEvent(new Event('resize'));"
         ),
