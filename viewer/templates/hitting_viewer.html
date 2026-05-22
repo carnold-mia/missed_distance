@@ -1,0 +1,1522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hitting Data Viewer</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Plotly -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    
+    <style>
+        .control-btn {
+            @apply p-2 rounded-full hover:bg-gray-200 transition-colors flex items-center justify-center text-gray-700;
+        }
+        .control-btn svg {
+            @apply w-5 h-5;
+        }
+        #play-btn {
+            @apply bg-blue-600 text-white hover:bg-blue-700;
+        }
+        #play-btn svg {
+            @apply text-white;
+        }
+        .view-btn-active {
+            @apply bg-blue-600 text-white;
+        }
+        .view-btn-inactive {
+            @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+        }
+        
+        /* Search dropdown */
+        #pitch-search-results {
+            max-height: 300px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-2">Hitting Data Viewer</h1>
+        <p class="text-gray-600 mb-6">Interactive 3D visualization of batter, bat, and ball positions</p>
+
+        <!-- Trial Selection: cascading Game ID → GUID dropdowns -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Trial Selection</h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Dropdown 1: Game ID -->
+                <div>
+                    <label for="game-select" class="block text-sm font-medium text-gray-700 mb-2">
+                        Game ID
+                    </label>
+                    <select id="game-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Loading games…</option>
+                    </select>
+                </div>
+
+                <!-- Dropdown 2: GUID (populated by JS after game selection) -->
+                <div>
+                    <label for="guid-select" class="block text-sm font-medium text-gray-700 mb-2">
+                        Trial (MLBAM_GUID)
+                    </label>
+                    <select id="guid-select" disabled
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <option value="">Select a game first…</option>
+                    </select>
+                    <!-- hidden: keeps backward-compat with any JS that reads pitch-select -->
+                    <select id="pitch-select" class="hidden"></select>
+                </div>
+            </div>
+
+            <!-- Trial frame range info (revealed once a GUID is selected) -->
+            <div id="pitch-info" class="mt-4 hidden">
+                <div class="text-sm">
+                    <div class="font-medium text-gray-700 mb-2">Trial Frame Range</div>
+                    <div class="bg-gray-50 p-3 rounded-md">
+                        <div class="flex justify-between mb-1">
+                            <span class="text-gray-600">Start Frame:</span>
+                            <span id="pitch-start" class="font-semibold">-</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600">End Frame:</span>
+                            <span id="pitch-end" class="font-semibold">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Visualization Section -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">Visualization</h2>
+                
+                <div class="flex items-center space-x-3">
+                    <!-- View Toggle Buttons -->
+                    <div class="flex space-x-2">
+                        <button id="view-front" class="view-btn px-3 py-1 rounded-md view-btn-inactive" data-view="Front">
+                            Front
+                        </button>
+                        <button id="view-side" class="view-btn px-3 py-1 rounded-md view-btn-inactive" data-view="Side">
+                            Side
+                        </button>
+                        <button id="view-top" class="view-btn px-3 py-1 rounded-md view-btn-inactive" data-view="Top">
+                            Top
+                        </button>
+                        <button id="view-3d" class="view-btn px-3 py-1 rounded-md view-btn-active" data-view="3D">
+                            3D
+                        </button>
+                    </div>
+                    
+                    <!-- Export Animation Button -->
+                    <button id="export-animation-btn" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors flex items-center space-x-2" title="Export animation as HTML">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        <span>Export Animation</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Plot Container -->
+            <div id="plot-container" style="height: 600px; width: 100%;" class="border border-gray-200 rounded-lg relative">
+                <div id="plot" style="width: 100%; height: 100%;"></div>
+            </div>
+        </div>
+
+        <!-- Missed Distance Status Bar -->
+        <div id="missed-distance-bar" class="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 hidden">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-6">
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Outcome:</span>
+                        <span id="outcome-badge" class="ml-2 px-2 py-1 rounded text-sm font-semibold">-</span>
+                    </div>
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Current Frame Distance:</span>
+                        <span id="current-md" class="ml-2 font-bold text-blue-600">-</span>
+                        <span class="text-sm text-gray-600">m</span>
+                    </div>
+                    <div>
+                        <span class="text-sm font-medium text-gray-700">Minimum Distance:</span>
+                        <span id="min-md" class="ml-2 font-bold text-green-600">-</span>
+                        <span class="text-sm text-gray-600">m</span>
+                        <span class="text-xs text-gray-500 ml-1">(at frame <span id="min-md-frame">-</span>)</span>
+                    </div>
+                    <div id="miss-vec-info" class="hidden">
+                        <span class="text-sm font-medium text-gray-700">Miss Vector:</span>
+                        <span id="miss-vec" class="ml-2 text-sm text-gray-600">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Linked Global Miss Trace -->
+        <div id="miss-trace-card" class="bg-white rounded-lg shadow-md p-4 mb-6 hidden">
+            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
+                <h2 class="text-xl font-semibold">Global Miss Trace</h2>
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-700">
+                    <span>Frame: <span id="trace-frame" class="font-semibold text-blue-600">-</span></span>
+                    <span>Distance: <span id="trace-distance" class="font-semibold text-green-600">-</span></span>
+                    <span>Speed: <span id="trace-speed" class="font-semibold text-orange-600">-</span></span>
+                </div>
+            </div>
+            <div id="miss-trace-empty" class="hidden text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-md p-3 mb-3">
+                No finite global ball/sweet-spot points are available for this trial.
+            </div>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div>
+                    <div class="text-sm font-medium text-gray-700 mb-2">Missed Distance</div>
+                    <div id="miss-distance-plot" style="height: 280px; width: 100%;" class="border border-gray-200 rounded-lg"></div>
+                </div>
+                <div>
+                    <div class="text-sm font-medium text-gray-700 mb-2">Miss Speed</div>
+                    <div id="miss-speed-plot" style="height: 280px; width: 100%;" class="border border-gray-200 rounded-lg"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Playback Controls Section -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <h2 class="text-xl font-semibold mb-4">Playback Controls</h2>
+            
+            <!-- Frame Slider -->
+            <div class="mb-4">
+                <label for="frame-slider" class="block text-sm font-medium text-gray-700 mb-2">
+                    Frame: <span id="current-frame" class="font-bold text-blue-600">{{ default_frame }}</span>
+                </label>
+                <input 
+                    id="frame-slider" 
+                    type="range" 
+                    min="{{ global_frame_min }}" 
+                    max="{{ global_frame_max }}" 
+                    value="{{ default_frame }}"
+                    class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                />
+                <div class="flex justify-between text-xs text-gray-500 mt-1">
+                    <span id="frame-min">{{ global_frame_min }}</span>
+                    <span id="frame-max">{{ global_frame_max }}</span>
+                </div>
+            </div>
+            
+            <!-- Control Buttons -->
+            <div class="playback-controls flex items-center space-x-2 bg-gray-50 border border-gray-200 p-3 rounded-lg">
+                <button id="rewind-btn" class="control-btn" title="Go to Start">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="11 17 6 12 11 7"></polyline>
+                        <polyline points="18 17 13 12 18 7"></polyline>
+                    </svg>
+                </button>
+                
+                <button id="prev-btn" class="control-btn" title="Previous Frame">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                </button>
+                
+                <button id="play-btn" class="control-btn" title="Play">
+                    <svg id="play-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    <svg id="pause-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2" style="display: none;">
+                        <rect x="6" y="4" width="4" height="16"></rect>
+                        <rect x="14" y="4" width="4" height="16"></rect>
+                    </svg>
+                </button>
+                
+                <button id="next-btn" class="control-btn" title="Next Frame">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                </button>
+                
+                <button id="forward-btn" class="control-btn" title="Go to End">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="13 17 18 12 13 7"></polyline>
+                        <polyline points="6 17 11 12 6 7"></polyline>
+                    </svg>
+                </button>
+                
+                <div class="ml-4 flex items-center">
+                    <label for="speed-select" class="text-sm font-medium text-gray-600 mr-2">Speed:</label>
+                    <select id="speed-select" class="text-sm py-1 px-2 rounded-md border-gray-300 bg-white">
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Display Options -->
+        <div class="bg-white rounded-lg shadow-md p-4">
+            <h2 class="text-xl font-semibold mb-4">Display Options</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="show-plate" checked class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Show Home Plate</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="show-skeleton" checked class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Show Skeleton</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="show-bat" checked class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Show Bat</span>
+                </label>
+
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="show-lcs" checked class="w-4 h-4 text-blue-600 rounded">
+                    <span class="text-sm font-medium text-gray-700">Show R80 LCS</span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration from Flask
+        const CONFIG = {
+            defaultPitchId: {{ default_pitch_id | tojson | safe }},
+            defaultFrame: {{ default_frame }},
+            pitchIds: {{ pitch_ids | tojson | safe }},
+            pitchLabels: {{ pitch_labels | tojson | safe }},
+            globalFrameMin: {{ global_frame_min }},
+            globalFrameMax: {{ global_frame_max }}
+        };
+
+        // State management
+        const state = {
+            currentFrame: CONFIG.defaultFrame,
+            currentPitchId: CONFIG.defaultPitchId,
+            isPlaying: false,
+            playbackSpeed: 1.0,
+            currentView: '3D',
+            showPlate: true,
+            showSkeleton: true,
+            showBat: true,
+            showLcs: true,
+            isScrubbing: false,
+            pitchRange: null,
+            currentPitchData: null,
+            currentMetricSeries: null,
+            cameraState: null
+        };
+
+        let playbackInterval = null;
+        let searchTimeout = null;
+        let currentAbortController = null; // AbortController to cancel pending requests
+        let pendingFrameUpdate = false; // Prevent overlapping frame updates
+        let lastRequestedFrame = null; // Track last requested frame to skip if outdated
+        let metricCursorAnimationFrame = null;
+        let pendingMetricFrame = null;
+        const sliderDebounceMs = 250;
+        const scrubThrottleMs = 140;
+        const cachedScrubThrottleMs = 24;
+        const pitchDataCache = new Map();
+
+        // Initialize plot with data from Flask
+        function initializePlot() {
+            try {
+                const plotData = {{ plot_payload | tojson | safe }};
+                console.log('Plot data loaded:', plotData);
+                
+                if (plotData && plotData.data && plotData.layout) {
+                    Plotly.newPlot('plot', plotData.data, plotData.layout, {
+                        responsive: true,
+                        displayModeBar: true,
+                        displaylogo: false,
+                        modeBarButtonsToRemove: ['toImage']
+                    }).then(() => {
+                        console.log('✅ Plot rendered successfully');
+                    }).catch((error) => {
+                        console.error('❌ Plot rendering failed:', error);
+                        showError('Failed to render plot: ' + error.message);
+                    });
+                } else {
+                    showError('No plot data available');
+                }
+            } catch (error) {
+                console.error('Failed to initialize plot:', error);
+                showError('Failed to load visualization: ' + error.message);
+            }
+        }
+
+        function selectedGameId() {
+            return document.getElementById('game-select')?.value || '';
+        }
+
+        function pitchCacheKey(pitchId) {
+            return `${selectedGameId()}|${pitchId || ''}|${state.showLcs ? 'lcs1' : 'lcs0'}`;
+        }
+
+        async function loadPitchData(pitchId) {
+            if (!pitchId) {
+                return null;
+            }
+
+            const key = pitchCacheKey(pitchId);
+            if (pitchDataCache.has(key)) {
+                return pitchDataCache.get(key);
+            }
+
+            const params = new URLSearchParams({
+                guid: pitchId,
+                show_lcs: state.showLcs ? 'true' : 'false'
+            });
+            const gameId = selectedGameId();
+            if (gameId) {
+                params.append('game_id', gameId);
+            }
+            const response = await fetch(`/api/pitch-data?${params}`);
+            const data = await response.json();
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
+            pitchDataCache.set(key, data);
+            return data;
+        }
+
+        function canUseCachedFrames() {
+            return Boolean(
+                state.currentView === '3D' &&
+                state.currentPitchId &&
+                state.currentPitchData &&
+                state.currentPitchData.frames &&
+                state.currentPitchData.frames.length
+            );
+        }
+
+        function nearestCachedFrameData(frame) {
+            const pitchData = state.currentPitchData;
+            if (!pitchData || !pitchData.frames || !pitchData.frames.length) {
+                return null;
+            }
+
+            const frames = pitchData.frames;
+            let lo = 0;
+            let hi = frames.length - 1;
+            while (lo < hi) {
+                const mid = Math.floor((lo + hi) / 2);
+                if (frames[mid] < frame) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            const previous = Math.max(0, lo - 1);
+            const chosenIndex =
+                Math.abs(frames[previous] - frame) <= Math.abs(frames[lo] - frame)
+                    ? previous
+                    : lo;
+            return pitchData.frames_data[chosenIndex];
+        }
+
+        function traceIndexByName() {
+            const plotDiv = document.getElementById('plot');
+            const index = {};
+            if (!plotDiv || !plotDiv.data) {
+                return index;
+            }
+
+            plotDiv.data.forEach((trace, i) => {
+                if (trace.name) {
+                    index[trace.name] = i;
+                }
+            });
+            return index;
+        }
+
+        async function renderCachedFrame(frame) {
+            const frameData = nearestCachedFrameData(frame);
+            if (!frameData) {
+                return false;
+            }
+
+            const plotDiv = document.getElementById('plot');
+            const traceIndex = traceIndexByName();
+            const dynamicTraces = [
+                ['Skeleton', frameData.skeleton],
+                ['Joints', frameData.joints],
+                ['Bat', frameData.bat],
+                ['Ball', frameData.ball],
+                ['Sweet Spot K80 (80%)', frameData.sweet_spot],
+                ['R80 X', frameData.r80_x],
+                ['R80 Y', frameData.r80_y],
+                ['R80 Z', frameData.r80_z]
+            ];
+
+            const indices = [];
+            const xUpdates = [];
+            const yUpdates = [];
+            const zUpdates = [];
+            dynamicTraces.forEach(([name, trace]) => {
+                if (traceIndex[name] === undefined || !trace) {
+                    return;
+                }
+                indices.push(traceIndex[name]);
+                xUpdates.push(trace.x || []);
+                yUpdates.push(trace.y || []);
+                zUpdates.push(trace.z || []);
+            });
+
+            if (!indices.length) {
+                return false;
+            }
+
+            await Plotly.restyle(plotDiv, { x: xUpdates, y: yUpdates, z: zUpdates }, indices);
+
+            if (traceIndex.Joints !== undefined && frameData.joints && frameData.joints.text) {
+                await Plotly.restyle(plotDiv, { text: [frameData.joints.text] }, [traceIndex.Joints]);
+            }
+
+            return true;
+        }
+
+        function numericMetricValue(value) {
+            return Number.isFinite(value) ? value : null;
+        }
+
+        function formatMetricValue(value, digits = 4) {
+            const numeric = numericMetricValue(value);
+            return numeric === null ? '-' : numeric.toFixed(digits);
+        }
+
+        function nearestMetricIndex(frame) {
+            const metrics = state.currentMetricSeries;
+            if (!metrics || !metrics.frames || !metrics.frames.length) {
+                return -1;
+            }
+
+            const frames = metrics.frames;
+            let lo = 0;
+            let hi = frames.length - 1;
+            while (lo < hi) {
+                const mid = Math.floor((lo + hi) / 2);
+                if (frames[mid] < frame) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            const previous = Math.max(0, lo - 1);
+            return Math.abs(frames[previous] - frame) <= Math.abs(frames[lo] - frame)
+                ? previous
+                : lo;
+        }
+
+        function updateMetricCursor(frame) {
+            const metrics = state.currentMetricSeries;
+            const distancePlot = document.getElementById('miss-distance-plot');
+            const speedPlot = document.getElementById('miss-speed-plot');
+            if (!metrics || (!distancePlot?.data && !speedPlot?.data)) {
+                return;
+            }
+
+            const index = nearestMetricIndex(frame);
+            const frameValue = index >= 0 ? metrics.frames[index] : frame;
+            const distance = index >= 0 ? metrics.missed_distance[index] : null;
+            const speed = index >= 0 ? metrics.miss_speed[index] : null;
+
+            document.getElementById('trace-frame').textContent = frameValue ?? '-';
+            document.getElementById('trace-distance').textContent =
+                `${formatMetricValue(distance)} m`;
+            document.getElementById('trace-speed').textContent =
+                `${formatMetricValue(speed)} m/s`;
+
+            const cursorUpdate = {
+                'shapes[0].x0': frame,
+                'shapes[0].x1': frame
+            };
+            const updates = [];
+            if (distancePlot?.data) {
+                updates.push(Plotly.relayout(distancePlot, cursorUpdate));
+            }
+            if (speedPlot?.data) {
+                updates.push(Plotly.relayout(speedPlot, cursorUpdate));
+            }
+            Promise.all(updates).catch(() => {});
+        }
+
+        function scheduleMetricCursorUpdate(frame) {
+            pendingMetricFrame = frame;
+            if (metricCursorAnimationFrame) {
+                return;
+            }
+            metricCursorAnimationFrame = window.requestAnimationFrame(() => {
+                metricCursorAnimationFrame = null;
+                updateMetricCursor(pendingMetricFrame);
+            });
+        }
+
+        function clearMetricTraceChart() {
+            state.currentMetricSeries = null;
+            document.getElementById('miss-trace-card').classList.add('hidden');
+            document.getElementById('miss-trace-empty').classList.add('hidden');
+            document.getElementById('trace-frame').textContent = '-';
+            document.getElementById('trace-distance').textContent = '-';
+            document.getElementById('trace-speed').textContent = '-';
+            for (const plotId of ['miss-distance-plot', 'miss-speed-plot']) {
+                const chartDiv = document.getElementById(plotId);
+                if (chartDiv && chartDiv.data) {
+                    Plotly.purge(chartDiv);
+                }
+            }
+        }
+
+        function finiteMetricPoints(metrics, valueKey) {
+            const visibleKey = `${valueKey}_visible`;
+            if (metrics?.[visibleKey]?.frames && metrics?.[visibleKey]?.values) {
+                return {
+                    frames: metrics[visibleKey].frames,
+                    values: metrics[visibleKey].values
+                };
+            }
+
+            const points = { frames: [], values: [] };
+            if (!metrics || !metrics.frames || !metrics[valueKey]) {
+                return points;
+            }
+
+            metrics.frames.forEach((frame, idx) => {
+                const value = metrics[valueKey][idx];
+                if (Number.isFinite(frame) && Number.isFinite(value)) {
+                    points.frames.push(frame);
+                    points.values.push(value);
+                }
+            });
+            return points;
+        }
+
+        function frameRangeFor(points) {
+            if (!points.frames.length) {
+                return null;
+            }
+            const minFrame = Math.min(...points.frames);
+            const maxFrame = Math.max(...points.frames);
+            if (minFrame === maxFrame) {
+                return [minFrame - 1, maxFrame + 1];
+            }
+            const pad = Math.max(1, (maxFrame - minFrame) * 0.04);
+            return [minFrame - pad, maxFrame + pad];
+        }
+
+        function singleMetricLayout({ yTitle, color, currentFrame, xRange }) {
+            return {
+                height: 280,
+                margin: { l: 58, r: 24, t: 14, b: 44 },
+                hovermode: 'x unified',
+                showlegend: false,
+                xaxis: {
+                    title: 'Frame',
+                    zeroline: false,
+                    showgrid: true,
+                    range: xRange || undefined
+                },
+                yaxis: {
+                    title: yTitle,
+                    rangemode: 'tozero',
+                    zeroline: false,
+                    showgrid: true,
+                    color
+                },
+                shapes: [
+                    {
+                        type: 'line',
+                        x0: currentFrame,
+                        x1: currentFrame,
+                        y0: 0,
+                        y1: 1,
+                        yref: 'paper',
+                        line: { color: '#111827', width: 2, dash: 'dash' }
+                    }
+                ]
+            };
+        }
+
+        async function renderMetricTraceChart(metrics) {
+            if (!metrics || !metrics.frames || !metrics.frames.length) {
+                clearMetricTraceChart();
+                return;
+            }
+
+            const distancePoints = finiteMetricPoints(metrics, 'missed_distance');
+            const speedPoints = finiteMetricPoints(metrics, 'miss_speed');
+            if (!distancePoints.frames.length && !speedPoints.frames.length) {
+                state.currentMetricSeries = metrics;
+                document.getElementById('miss-trace-card').classList.remove('hidden');
+                document.getElementById('miss-trace-empty').classList.remove('hidden');
+                return;
+            }
+
+            state.currentMetricSeries = metrics;
+            document.getElementById('miss-trace-card').classList.remove('hidden');
+            document.getElementById('miss-trace-empty').classList.add('hidden');
+
+            const distanceTrace = {
+                x: distancePoints.frames,
+                y: distancePoints.values,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Global missed distance',
+                line: { color: '#16a34a', width: 2 },
+                connectgaps: false
+            };
+            const speedTrace = {
+                x: speedPoints.frames,
+                y: speedPoints.values,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Global miss speed',
+                line: { color: '#ea580c', width: 2 },
+                connectgaps: false
+            };
+
+            await Promise.all([
+                Plotly.react(
+                    'miss-distance-plot',
+                    [distanceTrace],
+                    singleMetricLayout({
+                        yTitle: 'Distance (m)',
+                        color: '#16a34a',
+                        currentFrame: state.currentFrame,
+                        xRange: frameRangeFor(distancePoints)
+                    }),
+                    {
+                        responsive: true,
+                        displayModeBar: false
+                    }
+                ),
+                Plotly.react(
+                    'miss-speed-plot',
+                    [speedTrace],
+                    singleMetricLayout({
+                        yTitle: 'Speed (m/s)',
+                        color: '#ea580c',
+                        currentFrame: state.currentFrame,
+                        xRange: frameRangeFor(speedPoints)
+                    }),
+                    {
+                        responsive: true,
+                        displayModeBar: false
+                    }
+                )
+            ]);
+
+            window.requestAnimationFrame(() => {
+                ['miss-distance-plot', 'miss-speed-plot'].forEach((plotId) => {
+                    const plotDiv = document.getElementById(plotId);
+                    if (plotDiv?.data) {
+                        Plotly.Plots.resize(plotDiv);
+                    }
+                });
+            });
+            updateMetricCursor(state.currentFrame);
+        }
+
+        // Update plot for new frame
+        async function updateFrame(frame, skipIfPending = false) {
+            // If skipIfPending is true and there's already a pending update, skip this one
+            if (skipIfPending && pendingFrameUpdate) {
+                return;
+            }
+            
+            // Cancel any pending request
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+            
+            // Track this frame request
+            lastRequestedFrame = frame;
+            pendingFrameUpdate = true;
+            
+            // Update UI immediately for responsiveness
+            state.currentFrame = frame;
+            document.getElementById('current-frame').textContent = frame;
+            document.getElementById('frame-slider').value = frame;
+            scheduleMetricCursorUpdate(frame);
+            
+            try {
+                if ((state.isPlaying || state.isScrubbing) && canUseCachedFrames()) {
+                    const rendered = await renderCachedFrame(frame);
+                    if (rendered) {
+                        currentAbortController = null;
+                        pendingFrameUpdate = false;
+                        return;
+                    }
+                }
+
+                // Create new AbortController for this request
+                currentAbortController = new AbortController();
+                
+                const params = new URLSearchParams({
+                    frame: frame,
+                    view: state.currentView,
+                    show_plate: state.showPlate ? 'true' : 'false',
+                    show_lcs: state.showLcs ? 'true' : 'false',
+                    include_md: (state.isPlaying || state.isScrubbing) ? 'false' : 'true'
+                });
+                if (state.currentPitchId) {
+                    params.append('guid', state.currentPitchId);
+                }
+                
+                // Create fetch request with abort signal
+                const response = await fetch(`/api/frame?${params}`, {
+                    signal: currentAbortController.signal
+                });
+                
+                // Check if this request is still relevant (playback might have moved on)
+                if (lastRequestedFrame !== frame) {
+                    pendingFrameUpdate = false;
+                    return; // Skip this update, we're already on a different frame
+                }
+                
+                const payload = await response.json();
+                
+                if (payload.error) {
+                    throw new Error(payload.error);
+                }
+                
+                // Double-check frame is still current before updating plot
+                if (lastRequestedFrame !== frame) {
+                    pendingFrameUpdate = false;
+                    return;
+                }
+                
+                // Update missed distance display if available
+                if (payload.missed_distance) {
+                    updateMissedDistanceDisplay(payload.missed_distance);
+                }
+                
+                // Preserve camera position across frame changes (only for 3D)
+                if (state.currentView === '3D' && state.cameraState) {
+                    if (payload.layout.scene) {
+                        payload.layout.scene.camera = state.cameraState;
+                    }
+                }
+
+                await Plotly.react('plot', payload.data, payload.layout, {
+                    responsive: true,
+                    displayModeBar: true
+                });
+                
+                currentAbortController = null;
+                
+            } catch (error) {
+                // Only log if it's not a cancellation
+                if (error.name !== 'AbortError') {
+                    console.error('Failed to update frame:', error);
+                }
+            } finally {
+                // Only clear pending flag if this was the most recent request
+                if (lastRequestedFrame === frame) {
+                    pendingFrameUpdate = false;
+                }
+            }
+        }
+
+        // Playback controls
+        function togglePlayback() {
+            state.isPlaying = !state.isPlaying;
+            
+            const playIcon = document.getElementById('play-icon');
+            const pauseIcon = document.getElementById('pause-icon');
+            
+            if (state.isPlaying) {
+                playIcon.style.display = 'none';
+                pauseIcon.style.display = 'block';
+                startPlayback();
+            } else {
+                playIcon.style.display = 'block';
+                pauseIcon.style.display = 'none';
+                stopPlayback();
+            }
+        }
+
+        function startPlayback() {
+            const frameStep = 1;
+            // Cached 3D playback only restyles existing traces; server fallback stays slower.
+            const baseInterval = canUseCachedFrames() ? 35 : 90;
+            const interval = baseInterval / state.playbackSpeed;
+            
+            playbackInterval = setInterval(() => {
+                // Skip if there's already a pending update (prevents queue buildup)
+                if (pendingFrameUpdate) {
+                    // Don't increment frame - wait for current request to complete or be cancelled
+                    return;
+                }
+                
+                let nextFrame = state.currentFrame + frameStep;
+                
+                // Use global frame range - no limits!
+                const maxFrame = CONFIG.globalFrameMax;
+                const minFrame = CONFIG.globalFrameMin;
+                
+                if (nextFrame > maxFrame) {
+                    // Reached end - stop playback instead of looping
+                    stopPlayback();
+                    console.log('✅ Playback complete - reached end frame');
+                    return;
+                }
+                
+                // Update frame with skipIfPending=true to prevent queue buildup
+                // This will cancel any pending request and start a new one
+                updateFrame(nextFrame, true);
+            }, interval);
+        }
+
+        function stopPlayback() {
+            if (playbackInterval) {
+                clearInterval(playbackInterval);
+                playbackInterval = null;
+            }
+            // Cancel any pending request
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+            // Reset pending flag
+            pendingFrameUpdate = false;
+        }
+
+        function stepFrame(direction) {
+            stopPlayback();
+            state.isPlaying = false;
+            document.getElementById('play-icon').style.display = 'block';
+            document.getElementById('pause-icon').style.display = 'none';
+            
+            // Use global frame range - no limits!
+            const minFrame = CONFIG.globalFrameMin;
+            const maxFrame = CONFIG.globalFrameMax;
+            
+            let newFrame = state.currentFrame + direction;
+            newFrame = Math.max(minFrame, Math.min(maxFrame, newFrame));
+            
+            updateFrame(newFrame);
+        }
+
+        function jumpToFrame(frame) {
+            stopPlayback();
+            state.isPlaying = false;
+            document.getElementById('play-icon').style.display = 'block';
+            document.getElementById('pause-icon').style.display = 'none';
+            
+            updateFrame(frame);
+        }
+
+        // View switching
+        async function changeView(viewType) {
+            state.currentView = viewType;
+            
+            document.querySelectorAll('.view-btn').forEach(btn => {
+                if (btn.dataset.view === viewType) {
+                    btn.classList.remove('view-btn-inactive');
+                    btn.classList.add('view-btn-active');
+                } else {
+                    btn.classList.remove('view-btn-active');
+                    btn.classList.add('view-btn-inactive');
+                }
+            });
+            
+            await updateFrame(state.currentFrame);
+        }
+
+        // Pitch selection
+        async function selectPitch(pitchId) {
+            if (!pitchId) {
+                return;
+            }
+            
+            // Stop playback when changing pitches
+            if (state.isPlaying) {
+                togglePlayback();
+            }
+            
+            state.currentPitchId = pitchId;
+            state.currentPitchData = null;
+            clearMetricTraceChart();
+
+            // Sync the visible GUID dropdown (and the hidden legacy pitch-select)
+            document.getElementById('guid-select').value = pitchId;
+            document.getElementById('pitch-select').value = pitchId;
+            
+            try {
+                const response = await fetch(`/api/pitch-frames?guid=${pitchId}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                state.pitchRange = {
+                    min: data.min,
+                    max: data.max
+                };
+                
+                document.getElementById('pitch-start').textContent = data.min;
+                document.getElementById('pitch-end').textContent = data.max;
+                document.getElementById('pitch-info').classList.remove('hidden');
+                
+                // Keep slider at global range - don't restrict to pitch range
+                // User can still navigate to any frame across all pitches
+                document.getElementById('frame-slider').min = CONFIG.globalFrameMin;
+                document.getElementById('frame-slider').max = CONFIG.globalFrameMax;
+                document.getElementById('frame-min').textContent = CONFIG.globalFrameMin;
+                document.getElementById('frame-max').textContent = CONFIG.globalFrameMax;
+                
+                console.log(`📍 Pitch ${pitchId}: Frames ${data.min} to ${data.max}`);
+                
+                const pitchDataPromise = loadPitchData(pitchId)
+                    .then(async (pitchData) => {
+                        if (state.currentPitchId === pitchId) {
+                            state.currentPitchData = pitchData;
+                            await renderMetricTraceChart(pitchData.metrics);
+                            console.log(`⚡ Cached ${pitchData.count || 0} frames for smooth playback`);
+                        }
+                    })
+                    .catch((error) => {
+                        console.warn('Could not preload pitch playback cache:', error);
+                    });
+
+                // Jump to start of pitch using the full server-rendered layout.
+                await updateFrame(data.min);
+                await pitchDataPromise;
+            } catch (error) {
+                console.error('Failed to get pitch frames:', error);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Cascading dropdowns: Game ID → GUID
+        // ---------------------------------------------------------------
+
+        /** Populate the Game ID dropdown from /api/games on page load. */
+        async function loadGames() {
+            const gameSelect = document.getElementById('game-select');
+            try {
+                const resp = await fetch('/api/games');
+                const games = await resp.json();
+
+                gameSelect.innerHTML = '<option value="">Select a game…</option>';
+                games.forEach(g => {
+                    const opt = document.createElement('option');
+                    opt.value = g.id;
+                    opt.textContent = g.id;
+                    gameSelect.appendChild(opt);
+                });
+                console.log(`🗂  Loaded ${games.length} games into dropdown`);
+            } catch (err) {
+                console.error('Failed to load games:', err);
+                gameSelect.innerHTML = '<option value="">Error loading games</option>';
+            }
+        }
+
+        /**
+         * POST /api/select-game/<gameId> to load that game's CSV server-side,
+         * then populate the GUID dropdown with the returned trial list.
+         * This replaces any previously loaded game in memory.
+         */
+        async function loadGuidsForGame(gameId) {
+            const guidSelect = document.getElementById('guid-select');
+            guidSelect.disabled = true;
+            guidSelect.innerHTML = '<option value="">Loading game…</option>';
+            pitchDataCache.clear();
+            clearMetricTraceChart();
+
+            if (!gameId) {
+                guidSelect.innerHTML = '<option value="">Select a game first…</option>';
+                return;
+            }
+
+            try {
+                // Tell the server to load this game's motion_sequence CSV
+                const resp = await fetch(`/api/select-game/${encodeURIComponent(gameId)}`, {
+                    method: 'POST',
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.error || `HTTP ${resp.status}`);
+                }
+                const data = await resp.json();  // {game_id, trial_count, guids: [...]}
+
+                guidSelect.innerHTML = '<option value="">Select a trial…</option>';
+                data.guids.forEach(g => {
+                    const opt = document.createElement('option');
+                    opt.value = g.guid;
+                    opt.textContent = g.label;
+                    guidSelect.appendChild(opt);
+                });
+
+                guidSelect.disabled = false;
+                console.log(`✅ Game ${gameId} loaded: ${data.trial_count} trials`);
+
+                // Update the global frame range that drives the slider.
+                // These values are 0/0 in lazy mode until a game is loaded.
+                CONFIG.globalFrameMin = data.global_frame_min;
+                CONFIG.globalFrameMax = data.global_frame_max;
+                const slider = document.getElementById('frame-slider');
+                slider.min = data.global_frame_min;
+                slider.max = data.global_frame_max;
+                slider.value = data.global_frame_min;
+                document.getElementById('frame-min').textContent = data.global_frame_min;
+                document.getElementById('frame-max').textContent = data.global_frame_max;
+                console.log(`🎞  Frame range updated: ${data.global_frame_min}–${data.global_frame_max}`);
+            } catch (err) {
+                console.error('Failed to load game:', err);
+                guidSelect.innerHTML = `<option value="">Error: ${err.message}</option>`;
+            }
+        }
+
+        // Wire up the game dropdown change → reload GUIDs
+        document.getElementById('game-select').addEventListener('change', (e) => {
+            loadGuidsForGame(e.target.value);
+        });
+
+        // Wire up the GUID dropdown change → select trial
+        document.getElementById('guid-select').addEventListener('change', (e) => {
+            if (e.target.value) selectPitch(e.target.value);
+        });
+
+        // Update missed distance display
+        function updateMissedDistanceDisplay(mdInfo) {
+            const bar = document.getElementById('missed-distance-bar');
+            if (!mdInfo || !bar) {
+                bar.classList.add('hidden');
+                return;
+            }
+            
+            bar.classList.remove('hidden');
+            
+            // Outcome badge with color coding
+            const outcomeBadge = document.getElementById('outcome-badge');
+            if (mdInfo.outcome) {
+                outcomeBadge.textContent = mdInfo.outcome;
+                // Remove all color classes
+                outcomeBadge.classList.remove('bg-green-100', 'text-green-800', 
+                                             'bg-red-100', 'text-red-800',
+                                             'bg-yellow-100', 'text-yellow-800',
+                                             'bg-gray-100', 'text-gray-800',
+                                             'bg-blue-100', 'text-blue-800');
+                // Add appropriate color based on outcome
+                switch(mdInfo.outcome.toLowerCase()) {
+                    case 'contact':
+                    case 'hit':
+                        outcomeBadge.classList.add('bg-green-100', 'text-green-800');
+                        break;
+                    case 'swinging strike':
+                    case 'miss':
+                        outcomeBadge.classList.add('bg-red-100', 'text-red-800');
+                        break;
+                    case 'check swing':
+                        outcomeBadge.classList.add('bg-yellow-100', 'text-yellow-800');
+                        break;
+                    case 'take':
+                        outcomeBadge.classList.add('bg-gray-100', 'text-gray-800');
+                        break;
+                    default:
+                        outcomeBadge.classList.add('bg-blue-100', 'text-blue-800');
+                }
+            } else {
+                outcomeBadge.textContent = '-';
+                outcomeBadge.classList.remove('bg-green-100', 'text-green-800', 
+                                             'bg-red-100', 'text-red-800',
+                                             'bg-yellow-100', 'text-yellow-800',
+                                             'bg-gray-100', 'text-gray-800',
+                                             'bg-blue-100', 'text-blue-800');
+                outcomeBadge.classList.add('bg-gray-100', 'text-gray-800');
+            }
+            
+            // Current frame distance
+            if (mdInfo.current_frame_dist !== null && mdInfo.current_frame_dist !== undefined) {
+                document.getElementById('current-md').textContent = mdInfo.current_frame_dist.toFixed(4);
+            } else {
+                document.getElementById('current-md').textContent = '-';
+            }
+            
+            // Minimum distance
+            if (mdInfo.min_distance !== null && mdInfo.min_distance !== undefined) {
+                document.getElementById('min-md').textContent = mdInfo.min_distance.toFixed(4);
+            } else {
+                document.getElementById('min-md').textContent = '-';
+            }
+            
+            // Frame where minimum occurs
+            if (mdInfo.min_distance_frame !== null && mdInfo.min_distance_frame !== undefined) {
+                document.getElementById('min-md-frame').textContent = mdInfo.min_distance_frame;
+            } else {
+                document.getElementById('min-md-frame').textContent = '-';
+            }
+            
+            // Miss vector
+            if (mdInfo.miss_vec) {
+                const vec = mdInfo.miss_vec;
+                document.getElementById('miss-vec').textContent = 
+                    `(${vec.x.toFixed(3)}, ${vec.y.toFixed(3)}, ${vec.z.toFixed(3)}) m`;
+                document.getElementById('miss-vec-info').classList.remove('hidden');
+            } else {
+                document.getElementById('miss-vec-info').classList.add('hidden');
+            }
+        }
+
+        // UI helpers
+        function showError(message) {
+            console.error(message);
+            alert('Error: ' + message);
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            // Populate the Game ID dropdown immediately on load
+            loadGames();
+
+            // Initialize plot
+            initializePlot();
+            
+            // Track camera state for 3D view
+            const plotDiv = document.getElementById('plot');
+            let interactionTimeout = null;
+            let pendingCameraState = null;
+            
+            plotDiv.addEventListener('mousedown', () => {
+                if (interactionTimeout) {
+                    clearTimeout(interactionTimeout);
+                    interactionTimeout = null;
+                }
+            });
+            
+            plotDiv.on('plotly_relayout', function(eventData) {
+                if (eventData && eventData['scene.camera']) {
+                    pendingCameraState = eventData['scene.camera'];
+                }
+            });
+            
+            plotDiv.addEventListener('mouseup', () => {
+                interactionTimeout = setTimeout(() => {
+                    if (pendingCameraState) {
+                        state.cameraState = pendingCameraState;
+                        console.log('📷 Camera position saved');
+                        pendingCameraState = null;
+                    }
+                    interactionTimeout = null;
+                }, 300);
+            });
+
+            // Frame slider - distinguish between clicking and dragging
+            let sliderTimeout = null;
+            let sliderIsDragging = false;
+            let sliderStartValue = null;
+            let sliderMouseDown = false;
+            let lastSliderCommitAt = 0;
+            let lastScrubFetchAt = 0;
+            let scrubTimeout = null;
+            
+            const frameSlider = document.getElementById('frame-slider');
+            
+            // Track when user starts interacting with slider
+            frameSlider.addEventListener('mousedown', function(e) {
+                sliderMouseDown = true;
+                state.isScrubbing = true;
+                sliderStartValue = parseInt(e.target.value);
+                sliderIsDragging = false;
+            });
+            
+            // Track mouse movement to detect dragging
+            frameSlider.addEventListener('mousemove', function(e) {
+                if (sliderMouseDown) {
+                    const currentValue = parseInt(e.target.value);
+                    if (currentValue !== sliderStartValue) {
+                        sliderIsDragging = true;
+                    }
+                }
+            });
+            
+            // Handle mouse up - if it was a click (not drag), load immediately
+            frameSlider.addEventListener('mouseup', function(e) {
+                if (sliderMouseDown) {
+                    const targetFrame = parseInt(e.target.value);
+                    state.isScrubbing = false;
+                    
+                    // Cancel any pending requests
+                    if (currentAbortController) {
+                        currentAbortController.abort();
+                        currentAbortController = null;
+                    }
+                    pendingFrameUpdate = false;
+                    
+                    // Clear any pending timeout
+                    if (sliderTimeout) {
+                        clearTimeout(sliderTimeout);
+                        sliderTimeout = null;
+                    }
+                    if (scrubTimeout) {
+                        clearTimeout(scrubTimeout);
+                        scrubTimeout = null;
+                    }
+                    
+                    // Full update on release, including missed-distance info.
+                    lastSliderCommitAt = Date.now();
+                    updateFrame(targetFrame, false);
+                }
+                
+                sliderMouseDown = false;
+                sliderIsDragging = false;
+                sliderStartValue = null;
+            });
+            
+            // Handle input event (fires during dragging)
+            frameSlider.addEventListener('input', function(e) {
+                const targetFrame = parseInt(e.target.value);
+                
+                // Update UI immediately
+                state.currentFrame = targetFrame;
+                document.getElementById('current-frame').textContent = targetFrame;
+                document.getElementById('frame-slider').value = targetFrame;
+                scheduleMetricCursorUpdate(targetFrame);
+                
+                // If dragging, fetch at a controlled rate so the player moves without
+                // flooding the server.
+                if (sliderIsDragging || sliderMouseDown) {
+                    state.isScrubbing = true;
+                    const now = Date.now();
+                    const activeScrubThrottleMs = canUseCachedFrames() ? cachedScrubThrottleMs : scrubThrottleMs;
+                    const elapsed = now - lastScrubFetchAt;
+                    const loadScrubFrame = () => {
+                        lastScrubFetchAt = Date.now();
+                        scrubTimeout = null;
+                        updateFrame(parseInt(frameSlider.value), false);
+                    };
+
+                    if (elapsed >= activeScrubThrottleMs && (!pendingFrameUpdate || canUseCachedFrames())) {
+                        if (scrubTimeout) {
+                            clearTimeout(scrubTimeout);
+                            scrubTimeout = null;
+                        }
+                        loadScrubFrame();
+                    } else {
+                        if (scrubTimeout) {
+                            clearTimeout(scrubTimeout);
+                        }
+                        scrubTimeout = setTimeout(
+                            loadScrubFrame,
+                            Math.max(activeScrubThrottleMs - elapsed, canUseCachedFrames() ? 16 : 40)
+                        );
+                    }
+                } else {
+                    state.isScrubbing = false;
+                    if (sliderTimeout) {
+                        clearTimeout(sliderTimeout);
+                    }
+                    sliderTimeout = setTimeout(() => {
+                        updateFrame(targetFrame, false);
+                        sliderTimeout = null;
+                    }, sliderDebounceMs);
+                }
+            });
+            
+            // Handle change event (fires when slider value changes, including clicks)
+            frameSlider.addEventListener('change', function(e) {
+                const targetFrame = parseInt(e.target.value);
+                if (Date.now() - lastSliderCommitAt < 120) {
+                    return;
+                }
+                state.isScrubbing = false;
+                
+                // Cancel any pending requests
+                if (currentAbortController) {
+                    currentAbortController.abort();
+                    currentAbortController = null;
+                }
+                pendingFrameUpdate = false;
+                
+                // Clear any pending timeout
+                if (sliderTimeout) {
+                    clearTimeout(sliderTimeout);
+                    sliderTimeout = null;
+                }
+                
+                // If it wasn't a drag, load immediately
+                if (!sliderIsDragging) {
+                    updateFrame(targetFrame, false);
+                }
+            });
+            
+            // Playback controls
+            document.getElementById('rewind-btn').addEventListener('click', () => {
+                // Use global frame min - no limits!
+                jumpToFrame(CONFIG.globalFrameMin);
+            });
+            
+            document.getElementById('prev-btn').addEventListener('click', () => stepFrame(-1));
+            document.getElementById('play-btn').addEventListener('click', togglePlayback);
+            document.getElementById('next-btn').addEventListener('click', () => stepFrame(1));
+            
+            document.getElementById('forward-btn').addEventListener('click', () => {
+                // Use global frame max - no limits!
+                jumpToFrame(CONFIG.globalFrameMax);
+            });
+            
+            // Speed control
+            document.getElementById('speed-select').addEventListener('change', function(e) {
+                state.playbackSpeed = parseFloat(e.target.value);
+                if (state.isPlaying) {
+                    stopPlayback();
+                    startPlayback();
+                }
+            });
+            
+            // View buttons
+            document.querySelectorAll('.view-btn').forEach(btn => {
+                btn.addEventListener('click', () => changeView(btn.dataset.view));
+            });
+            
+            // Export animation button
+            document.getElementById('export-animation-btn').addEventListener('click', async function() {
+                if (!state.currentPitchId) {
+                    alert('Please select a pitch first');
+                    return;
+                }
+                
+                const btn = this;
+                const originalText = btn.innerHTML;
+                
+                // Disable button and show loading state
+                btn.disabled = true;
+                btn.innerHTML = '<span>Exporting...</span>';
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+                
+                try {
+                    const params = new URLSearchParams({
+                        guid: state.currentPitchId,
+                        view: state.currentView
+                    });
+                    
+                    const response = await fetch(`/api/export-animation?${params}`);
+                    
+                    if (!response.ok) {
+                        const error = await response.json();
+                        throw new Error(error.error || 'Export failed');
+                    }
+                    
+                    // Get filename from Content-Disposition header or use default
+                    const contentDisposition = response.headers.get('Content-Disposition');
+                    let filename = `hitting_animation_${state.currentPitchId}_${state.currentView}.html`;
+                    if (contentDisposition) {
+                        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+                        if (filenameMatch) {
+                            filename = filenameMatch[1];
+                        }
+                    }
+                    
+                    // Create blob and download
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    console.log('✅ Animation exported successfully');
+                } catch (error) {
+                    console.error('❌ Export failed:', error);
+                    alert('Export failed: ' + error.message);
+                } finally {
+                    // Restore button state
+                    btn.disabled = false;
+                    btn.innerHTML = originalText;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            });
+            
+            // Pitch selection
+            document.getElementById('pitch-select').addEventListener('change', function(e) {
+                selectPitch(e.target.value);
+            });
+            
+            // Pitch search
+            const pitchSearch = document.getElementById('pitch-search');
+            const pitchSearchResults = document.getElementById('pitch-search-results');
+            if (pitchSearch && pitchSearchResults) {
+                pitchSearch.addEventListener('input', function(e) {
+                    const query = e.target.value;
+                    if (searchTimeout) {
+                        clearTimeout(searchTimeout);
+                    }
+                    searchTimeout = setTimeout(() => searchPitches(query), 300);
+                });
+            }
+            
+            // Close search results when clicking outside
+            document.addEventListener('click', function(e) {
+                if (
+                    pitchSearchResults &&
+                    !e.target.closest('#pitch-search') &&
+                    !e.target.closest('#pitch-search-results')
+                ) {
+                    pitchSearchResults.classList.add('hidden');
+                }
+            });
+            
+            // Display options (placeholder - would need backend support)
+            document.getElementById('show-plate').addEventListener('change', function(e) {
+                state.showPlate = e.target.checked;
+                updateFrame(state.currentFrame);
+            });
+
+            document.getElementById('show-lcs').addEventListener('change', async function(e) {
+                state.showLcs = e.target.checked;
+                state.currentPitchData = null;
+                pitchDataCache.clear();
+                await updateFrame(state.currentFrame);
+                if (state.currentPitchId) {
+                    try {
+                        state.currentPitchData = await loadPitchData(state.currentPitchId);
+                        await renderMetricTraceChart(state.currentPitchData.metrics);
+                    } catch (error) {
+                        console.warn('Could not reload pitch playback cache:', error);
+                    }
+                }
+            });
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                switch(e.key) {
+                    case ' ':
+                        e.preventDefault();
+                        togglePlayback();
+                        break;
+                    case 'ArrowLeft':
+                        e.preventDefault();
+                        stepFrame(-1);
+                        break;
+                    case 'ArrowRight':
+                        e.preventDefault();
+                        stepFrame(1);
+                        break;
+                }
+            });
+            
+            // Initialize with default pitch
+            if (CONFIG.defaultPitchId) {
+                selectPitch(CONFIG.defaultPitchId);
+            }
+        });
+    </script>
+</body>
+</html>

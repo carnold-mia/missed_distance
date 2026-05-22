@@ -1,0 +1,40 @@
+# ── Sensitive / proprietary data ──────────────────────────────────────────────
+# Top-level raw & processed data directories (contain player-level CSVs)
+data/
+# Outcome-summary CSVs and processed outputs in results/
+results/
+# Raw / intermediate data nested inside analysis/
+analysis/data/
+# Notion integration folder (may contain API tokens, page exports)
+notion/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ── OS / editor artifacts ─────────────────────────────────────────────────────
+.DS_Store
+.vscode/
+*.swp
+*.swo
+
+# ── Cleanup manifests (generated locally, not needed in repo) ─────────────────
+CLEANUP_MANIFEST_*.txt
+
+# ── Temporary outputs ─────────────────────────────────────────────────────────
+.tmp/
+fig_outputs/
+archive/
