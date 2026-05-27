@@ -18,18 +18,41 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.pytest_cache/
 *.egg-info/
 dist/
 build/
+
+# ── Python tooling caches ─────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
+env/
 
 # ── OS / editor artifacts ─────────────────────────────────────────────────────
 .DS_Store
 .vscode/
 *.swp
 *.swo
+
+# ── OneDrive / Office / sync noise ────────────────────────────────────────────
+# Temp and lock files created by Office apps and OneDrive sync
+*.tmp
+~$*
+*.bak
+*.orig
+# Windows shortcut / URL files that OneDrive sometimes syncs
+*.lnk
+*.url
+# Partial downloads and iCloud/OneDrive sync-in-progress markers
+*.partial
+*.icloud
+# OneDrive conflict copies (e.g. file-sync-conflict-2026-05-27.csv)
+*sync-conflict-*
 
 # ── Cleanup manifests (generated locally, not needed in repo) ─────────────────
 CLEANUP_MANIFEST_*.txt
