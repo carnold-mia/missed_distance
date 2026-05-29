@@ -46,8 +46,12 @@ SWEET_SPOTS = {"K80": 0.80}
 AXES = ("X", "Y", "Z")
 SPACES_LOCAL_GLOBAL = ("LOCAL", "GLOBAL")
 SPACES_GLOBAL_LOCAL = ("GLOBAL", "LOCAL")
-BAND_LO_FRACTION = 0.79
-BAND_HI_FRACTION = 0.85
+SWEET_SPOT_ORIGIN_NAME = "SWEET_SPOT_ORIGIN"
+SWEET_SPOT_ORIGIN_LOCAL_OFFSET = (0.0, 0.0, 0.01)
+SWEET_SPOT_ZONE_CENTER_Y = 0.0
+SWEET_SPOT_ZONE_CENTER_Z = 0.0
+SWEET_SPOT_ZONE_SEMI_MAJOR_Y = 0.06
+SWEET_SPOT_ZONE_SEMI_MINOR_Z = 0.04
 
 LOWPASS_CUTOFF_HZ = 30.0
 LOWPASS_ORDER = 4
@@ -94,13 +98,6 @@ META_DESIRED_METRICS = [
     "GCS_PATH",
     "CREATED_AT",
     "ITEM",
-    "BAD",
-    "R",
-    "TAKE",
-    "SWING",
-    "MISS",
-    "BALL_CONTACT",
-    "CHECK_SWING",
     "BALL_START",
     "BAT_START",
     "BALL_MIN",
@@ -112,12 +109,16 @@ META_DESIRED_METRICS = [
     "SETUP",
     "START_DATA",
     "BALL_PITCH_VELOCITY",
-    "HANDEDNESS",
     "HEIGHT",
     "KT_DATA_TYPE",
     "MASS",
     "MAX_BAT_SPEED_MPH",
 ]
+
+OUTPUT_META_RENAMES = {
+    "BALL_MIN": "KT_BALL_MIN_FRAME",
+    "BALL_MIN_DIST_MISS": "KT_BALL_MIN_DIST_MISS",
+}
 
 EVENT_COLS = ("DOWNSWING", "DS", "BALL_START", "BAT_START", "BALL_MIN", "BAT_STOP")
 EVENT_COLORS = {
@@ -137,18 +138,18 @@ FOOT_ANKLE_COLS = (
     "RIGHTANKLE_TX", "RIGHTANKLE_TY", "RIGHTANKLE_TZ",
 )
 FOOT_ANKLE_START_SOURCES = {
-    "LEFTFOOT_AT_START_DATA_X": "LEFTFOOT_TX",
-    "LEFTFOOT_AT_START_DATA_Y": "LEFTFOOT_TY",
-    "LEFTFOOT_AT_START_DATA_Z": "LEFTFOOT_TZ",
-    "RIGHTFOOT_AT_START_DATA_X": "RIGHTFOOT_TX",
-    "RIGHTFOOT_AT_START_DATA_Y": "RIGHTFOOT_TY",
-    "RIGHTFOOT_AT_START_DATA_Z": "RIGHTFOOT_TZ",
-    "LEFTANKLE_AT_START_DATA_X": "LEFTANKLE_TX",
-    "LEFTANKLE_AT_START_DATA_Y": "LEFTANKLE_TY",
-    "LEFTANKLE_AT_START_DATA_Z": "LEFTANKLE_TZ",
-    "RIGHTANKLE_AT_START_DATA_X": "RIGHTANKLE_TX",
-    "RIGHTANKLE_AT_START_DATA_Y": "RIGHTANKLE_TY",
-    "RIGHTANKLE_AT_START_DATA_Z": "RIGHTANKLE_TZ",
+    "L_FOOT_START_X": "LEFTFOOT_TX",
+    "L_FOOT_START_Y": "LEFTFOOT_TY",
+    "L_FOOT_START_Z": "LEFTFOOT_TZ",
+    "R_FOOT_START_X": "RIGHTFOOT_TX",
+    "R_FOOT_START_Y": "RIGHTFOOT_TY",
+    "R_FOOT_START_Z": "RIGHTFOOT_TZ",
+    "L_ANKLE_START_X": "LEFTANKLE_TX",
+    "L_ANKLE_START_Y": "LEFTANKLE_TY",
+    "L_ANKLE_START_Z": "LEFTANKLE_TZ",
+    "R_ANKLE_START_X": "RIGHTANKLE_TX",
+    "R_ANKLE_START_Y": "RIGHTANKLE_TY",
+    "R_ANKLE_START_Z": "RIGHTANKLE_TZ",
 }
 
 
@@ -216,13 +217,34 @@ def _to_vec3(df: pd.DataFrame, px: str, py: str, pz: str) -> np.ndarray:
 
 
 def _sweet_spot_positions(knob: np.ndarray, top: np.ndarray) -> dict[str, np.ndarray]:
-    """Return K80 sweet-spot and contact-band loci along knob-to-top."""
+    """Return K80 sweet-spot loci along knob-to-top."""
     bat = top - knob
     return {
         "ss_k80": knob + SWEET_SPOTS["K80"] * bat,
-        "ss_top": knob + BAND_HI_FRACTION * bat,
-        "ss_bottom": knob + BAND_LO_FRACTION * bat,
     }
+
+
+def _sweet_spot_origin_global(
+    k80_global: np.ndarray,
+    r_bat80: np.ndarray,
+) -> np.ndarray:
+    """Copy R_80 orientation and shift K80 by the configured local origin offset."""
+    k80 = np.asarray(k80_global, dtype=float)
+    rotation = np.asarray(r_bat80, dtype=float)
+    offset_local = np.asarray(SWEET_SPOT_ORIGIN_LOCAL_OFFSET, dtype=float)
+
+    if k80.ndim != 2 or k80.shape[0] != 3:
+        raise ValueError(f"k80_global must have shape (3, n_frames); got {k80.shape}")
+    if rotation.ndim != 3 or rotation.shape[1:] != (3, 3):
+        raise ValueError(f"r_bat80 must have shape (n_frames, 3, 3); got {rotation.shape}")
+    if rotation.shape[0] != k80.shape[1]:
+        raise ValueError(
+            "r_bat80 frame count must match k80_global frame count; "
+            f"got {rotation.shape[0]} and {k80.shape[1]}"
+        )
+
+    offset_global = np.einsum("fij,j->if", rotation, offset_local)
+    return k80 + offset_global
 
 
 def _fixed_lowpass_filter(
@@ -700,6 +722,35 @@ def _global_to_bat_local(
     return np.einsum("fij,fj->fi", r_bat_t, points - origin).T
 
 
+def _check_bat_geometry_in_local_frame(
+    knob_local: np.ndarray,
+    top_local: np.ndarray,
+    *,
+    label: str,
+    tolerance: float = 1e-6,
+) -> None:
+    """Validate that the local bat endpoints remain aligned with local Y."""
+    span = top_local - knob_local
+    finite = np.isfinite(span).all(axis=0)
+    if not finite.any():
+        logger.warning("%s has no finite local bat endpoint geometry to check.", label)
+        return
+
+    span_valid = span[:, finite]
+    transverse = np.linalg.norm(span_valid[[0, 2], :], axis=0)
+    max_transverse = float(np.nanmax(transverse)) if transverse.size else np.nan
+    min_y = float(np.nanmin(span_valid[1, :]))
+
+    if min_y <= 0.0 or (np.isfinite(max_transverse) and max_transverse > tolerance):
+        logger.warning(
+            "%s local bat endpoint check failed: min top-minus-knob Y=%.6g, "
+            "max transverse span=%.6g.",
+            label,
+            min_y,
+            max_transverse,
+        )
+
+
 def _minimum_index(distance: np.ndarray) -> int | None:
     """Return the frame index of the minimum distance, or None if all values are NaN."""
     if distance.size == 0:
@@ -952,23 +1003,18 @@ def _closest_distance_and_vector(
     return t_min, float(distances[t_min]), miss_all[:, t_min].copy()
 
 
-def _axial_band_check(
-    knob_t: np.ndarray,
-    ball_t: np.ndarray,
-    ss_top_t: np.ndarray,
-    ss_bottom_t: np.ndarray,
-) -> bool:
-    axis = ss_top_t - knob_t
-    norm = np.linalg.norm(axis)
-    if norm == 0.0:
+def _sweet_spot_zone_check(*, local_y: float, local_z: float) -> bool:
+    if not np.isfinite(local_y) or not np.isfinite(local_z):
         return False
-    unit_axis = axis / norm
-    projected = float(np.dot(ball_t - knob_t, unit_axis))
-    top_radius = np.linalg.norm(ss_top_t - knob_t)
-    bottom_radius = np.linalg.norm(ss_bottom_t - knob_t)
-    lo, hi = sorted((bottom_radius, top_radius))
+
+    y_term = (
+        (local_y - SWEET_SPOT_ZONE_CENTER_Y) / SWEET_SPOT_ZONE_SEMI_MAJOR_Y
+    ) ** 2
+    z_term = (
+        (local_z - SWEET_SPOT_ZONE_CENTER_Z) / SWEET_SPOT_ZONE_SEMI_MINOR_Z
+    ) ** 2
     eps = 1e-9
-    return lo - eps <= projected <= hi + eps
+    return y_term + z_term <= 1.0 + eps
 
 
 # --------------------------
@@ -989,15 +1035,41 @@ def _flag_is_set(df_pitch: pd.DataFrame, col: str) -> bool:
     if col not in df_pitch.columns:
         return False
     vals = df_pitch[col].dropna()
-    return not vals.empty
+    if vals.empty:
+        return False
+    false_like = {"", "0", "0.0", "FALSE", "N", "NO", "NONE", "NAN", "NULL"}
+    for value in vals:
+        if isinstance(value, (bool, np.bool_)):
+            if bool(value):
+                return True
+            continue
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            if np.isfinite(value) and float(value) != 0.0:
+                return True
+            continue
+        if str(value).strip().upper() not in false_like:
+            return True
+    return False
+
+
+def _infer_hitter_handedness_from_report_flags(df_pitch: pd.DataFrame) -> str | float:
+    """Collapse explicit hitter-side report flags into one validation column."""
+    has_r = _flag_is_set(df_pitch, "R")
+    has_l = _flag_is_set(df_pitch, "L")
+    if has_r and has_l:
+        return "AMBIGUOUS"
+    if has_r:
+        return "R"
+    if has_l:
+        return "L"
+    return np.nan
 
 
 def _infer_handedness_from_report(df_pitch: pd.DataFrame) -> str | float:
     """Infer batter side from explicit report R/L flags or foot positions."""
-    if _flag_is_set(df_pitch, "R"):
-        return "R"
-    if _flag_is_set(df_pitch, "L"):
-        return "L"
+    hitter_handedness = _infer_hitter_handedness_from_report_flags(df_pitch)
+    if hitter_handedness in {"R", "L"}:
+        return hitter_handedness
     if {"LEFTFOOT_TX", "RIGHTFOOT_TX"}.issubset(df_pitch.columns):
         left_back_foot = df_pitch["LEFTFOOT_TX"].iloc[0]
         right_back_foot = df_pitch["RIGHTFOOT_TX"].iloc[0]
@@ -1008,14 +1080,21 @@ def _infer_handedness_from_report(df_pitch: pd.DataFrame) -> str | float:
     return np.nan
 
 
-def _infer_outcome_with_take_skip(df_pitch: pd.DataFrame) -> tuple[str, bool]:
-    """Classify a pitch as hit, miss, check_swing, or unknown.
+def _has_bad_trial_flag(df_pitch: pd.DataFrame) -> bool:
+    """Return True when the report marks the trial as BAD."""
+    return _flag_is_set(df_pitch, "BAD")
 
-    Flag columns (TAKE, SWING, BALL_CONTACT, MISS, CHECK_SWING) are
+
+def _infer_outcome_with_take_skip(df_pitch: pd.DataFrame) -> tuple[str, bool]:
+    """Classify a pitch as a contact event, miss, check-swing, bad, or skip.
+
+    Flag columns (TAKE, BAD, SWING, BALL_CONTACT, MISS, CHECK_SWING) are
     independent boolean indicators — a non-NaN value means the flag is set.
     """
     if _flag_is_set(df_pitch, "TAKE"):
         return "TAKE", True
+    if _has_bad_trial_flag(df_pitch):
+        return "BAD", False
 
     has_contact = _flag_is_set(df_pitch, "BALL_CONTACT")
     has_check_swing = _flag_is_set(df_pitch, "CHECK_SWING")
@@ -1023,18 +1102,12 @@ def _infer_outcome_with_take_skip(df_pitch: pd.DataFrame) -> tuple[str, bool]:
     has_miss = _flag_is_set(df_pitch, "MISS")
 
     if has_contact:
-        return "hit", False
+        return "BALL_CONTACT", False
     if has_check_swing:
         return "CHECK_SWING", False
     if has_miss or (has_swing and not has_contact):
-        return "miss", False
-    return np.nan, False
-
-
-def _fill_derived_report_tags(meta_pitch: dict[str, object], outcome: object) -> None:
-    """Fill report-style tags when the raw report stores the state implicitly."""
-    if outcome == "miss" and pd.isna(meta_pitch.get("MISS", np.nan)):
-        meta_pitch["MISS"] = "MISS"
+        return "MISS", False
+    return "NO_REPORT", True
 
 
 def _frame_vector(df_pitch: pd.DataFrame, n_frames: int) -> np.ndarray:
@@ -1163,15 +1236,15 @@ def _add_window_max_metrics(
     speed: np.ndarray,
 ) -> None:
     for axis in AXES:
-        row[f"MAX_MISS_VELOCITY_{spot}_{space}_{axis}"] = np.nan
-    row[f"MAX_MISS_SPEED_{spot}_{space}"] = np.nan
+        row[f"MAX_MISS_VELOCITY_{space}_{axis}"] = np.nan
+    row[f"MAX_MISS_SPEED_{space}"] = np.nan
 
     if end_idx is None:
         return
 
     for axis, value in _signed_peak_components(velocity, start_idx, end_idx).items():
-        row[f"MAX_MISS_VELOCITY_{spot}_{space}_{axis}"] = value
-    row[f"MAX_MISS_SPEED_{spot}_{space}"] = _max_speed(
+        row[f"MAX_MISS_VELOCITY_{space}_{axis}"] = value
+    row[f"MAX_MISS_SPEED_{space}"] = _max_speed(
         speed,
         start_idx,
         end_idx,
@@ -1183,8 +1256,8 @@ def _add_local_miss_direction_flags(
     miss_vector_local: np.ndarray,
     idx: int | None,
 ) -> None:
-    """Classify the K80 local miss vector at T_MIN_LOCAL."""
-    for col in ("CAPPED", "JAMMED", "OVER", "UNDER"):
+    """Classify the local miss vector at T_MIN_LOCAL."""
+    for col in ("CAPPED", "JAMMED", "SWUNG_OVER", "SWUNG_UNDER"):
         row[col] = np.nan
 
     if idx is None:
@@ -1197,8 +1270,8 @@ def _add_local_miss_direction_flags(
 
     row["CAPPED"] = 1 if y_value > 0.0 else 0
     row["JAMMED"] = 1 if y_value < 0.0 else 0
-    row["OVER"] = 1 if z_value < 0.0 else 0
-    row["UNDER"] = 1 if z_value > 0.0 else 0
+    row["SWUNG_OVER"] = 1 if z_value > 0.0 else 0
+    row["SWUNG_UNDER"] = 1 if z_value < 0.0 else 0
 
 
 def _axis_values(vector_xyz: np.ndarray, idx: int) -> dict[str, float]:
@@ -1235,32 +1308,27 @@ def _add_metrics_for_space(
     if idx is None:
         return
 
-    row[f"T_MIN_{space}_{spot}"] = frame_value
-    row[f"MISSED_DISTANCE_{space}_{spot}"] = float(distance[idx])
+    row[f"T_MIN_{space}"] = frame_value
+    row[f"MISSED_DISTANCE_{space}"] = float(distance[idx])
 
     for axis, value in _axis_values(miss_vector, idx).items():
-        row[f"MISS_VECTOR_{space}_{spot}_{axis}"] = value
+        row[f"MISS_VECTOR_{space}_{axis}"] = value
     for axis, value in _axis_values(velocity, idx).items():
-        row[f"MISS_VECTOR_VELOCITY_{space}_{spot}_{axis}"] = value
+        row[f"MISS_VELOCITY_{space}_{axis}"] = value
 
-    row[f"MISSED_DISTANCE_{space}_{spot}_SPEED_AT_TMIN"] = float(speed[idx])
+    row[f"MISS_SPEED_{space}_AT_TMIN"] = float(speed[idx])
 
     if space == "GLOBAL":
-        ball_prefix = f"BALL_AT_TMIN_{spot}"
-        knob_prefix = f"BAT_KNOB_AT_TMIN_{spot}"
-        top_prefix = f"BAT_TOP_AT_TMIN_{spot}"
-    else:
-        ball_prefix = f"BALL_IN_BAT_AT_TMIN_{spot}"
-        top_prefix = f"BAT_TOP_IN_BAT_AT_TMIN_{spot}"
-
-    for axis, value in _axis_values(ball_position, idx).items():
-        row[f"{ball_prefix}_{axis}"] = value
-    for axis, value in _axis_values(bat_top_position, idx).items():
-        row[f"{top_prefix}_{axis}"] = value
-    if space == "GLOBAL":
+        ball_prefix = "BALL_AT_TMIN"
+        knob_prefix = "BAT_KNOB_AT_TMIN"
+        top_prefix = "BAT_TOP_AT_TMIN"
+        for axis, value in _axis_values(bat_top_position, idx).items():
+            row[f"{top_prefix}_{axis}"] = value
+        for axis, value in _axis_values(ball_position, idx).items():
+            row[f"{ball_prefix}_{axis}"] = value
         for axis, value in _axis_values(bat_knob_position, idx).items():
             row[f"{knob_prefix}_{axis}"] = value
-        ss_prefix = f"SS_{spot}_AT_TMIN"
+        ss_prefix = "SWEET_SPOT_ORIGIN_AT_TMIN"
         for axis, value in _axis_values(sweet_spot_position, idx).items():
             row[f"{ss_prefix}_{axis}"] = value
 
@@ -1269,7 +1337,8 @@ def _add_time_series_spot_columns(
     ts_data: dict[str, object],
     *,
     spot: str,
-    ss_global: np.ndarray,
+    k80_global: np.ndarray,
+    sweet_spot_origin_global: np.ndarray,
     miss_global: np.ndarray,
     miss_local: np.ndarray,
     distance_global: np.ndarray,
@@ -1280,16 +1349,16 @@ def _add_time_series_spot_columns(
     speed_local: np.ndarray,
 ) -> None:
     for axis_idx, axis in enumerate(("X", "Y", "Z")):
-        ts_data[f"SS_{spot}_{axis}"] = ss_global[axis_idx]
-        ts_data[f"MISS_VECTOR_GLOBAL_{spot}_{axis}"] = miss_global[axis_idx]
-        ts_data[f"MISS_VECTOR_LOCAL_{spot}_{axis}"] = miss_local[axis_idx]
-        ts_data[f"MISS_VECTOR_VELOCITY_GLOBAL_{spot}_{axis}"] = velocity_global[axis_idx]
-        ts_data[f"MISS_VECTOR_VELOCITY_LOCAL_{spot}_{axis}"] = velocity_local[axis_idx]
+        ts_data[f"K80_{axis}"] = k80_global[axis_idx]
+        ts_data[f"SWEET_SPOT_ORIGIN_{axis}"] = sweet_spot_origin_global[axis_idx]
+        ts_data[f"MISS_VECTOR_GLOBAL_{axis}"] = miss_global[axis_idx]
+        ts_data[f"MISS_VELOCITY_GLOBAL_{axis}"] = velocity_global[axis_idx]
+        ts_data[f"MISS_VELOCITY_LOCAL_{axis}"] = velocity_local[axis_idx]
 
-    ts_data[f"MISSED_DISTANCE_GLOBAL_{spot}"] = distance_global
-    ts_data[f"MISSED_DISTANCE_LOCAL_{spot}"] = distance_local
-    ts_data[f"MISSED_DISTANCE_GLOBAL_{spot}_SPEED"] = speed_global
-    ts_data[f"MISSED_DISTANCE_LOCAL_{spot}_SPEED"] = speed_local
+    ts_data["MISSED_DISTANCE_GLOBAL"] = distance_global
+    ts_data["MISSED_DISTANCE_LOCAL"] = distance_local
+    ts_data["MISS_SPEED_GLOBAL"] = speed_global
+    ts_data["MISS_SPEED_LOCAL"] = speed_local
 
 
 def _existing(columns: pd.Index, desired: Sequence[str]) -> list[str]:
@@ -1344,11 +1413,12 @@ def compute_discrete_and_time_series(
     ts_chunks: list[pd.DataFrame] = []
     processed_count = 0
     outcome_counts = {
-        "hit": 0,
-        "miss": 0,
+        "BALL_CONTACT": 0,
+        "MISS": 0,
         "CHECK_SWING": 0,
-        "no_report": 0,
+        "BAD": 0,
         "TAKE_skipped": 0,
+        "NO_REPORT_skipped": 0,
         "empty_frames_skipped": 0,
     }
     r80_unit_vectors_confirmed = 0
@@ -1366,7 +1436,8 @@ def compute_discrete_and_time_series(
 
         outcome, skip = _infer_outcome_with_take_skip(df_pitch)
         if skip:
-            outcome_counts["TAKE_skipped"] += 1
+            skip_key = f"{outcome}_skipped"
+            outcome_counts[skip_key] = outcome_counts.get(skip_key, 0) + 1
             continue
         if df_pitch.empty:
             outcome_counts["empty_frames_skipped"] += 1
@@ -1375,6 +1446,7 @@ def compute_discrete_and_time_series(
         left_back_foot = df_pitch["LEFTFOOT_TX"].iloc[0]
         right_back_foot = df_pitch["RIGHTFOOT_TX"].iloc[0]
         handedness = _infer_handedness_from_report(df_pitch)
+        hitter_handedness = _infer_hitter_handedness_from_report_flags(df_pitch)
         back_foot_x_pos = left_back_foot if handedness == "L" else right_back_foot
 
         ball_global = _to_vec3(df_pitch, "CENTER_TX", "CENTER_TY", "CENTER_TZ")
@@ -1389,13 +1461,7 @@ def compute_discrete_and_time_series(
             continue
 
         processed_count += 1
-        count_key = outcome if pd.notna(outcome) else "no_report"
-        outcome_counts[count_key] = outcome_counts.get(count_key, 0) + 1
-
-        ss_positions = _sweet_spot_positions(knob_global, top_global)
-        ss_global = {
-            "K80": ss_positions["ss_k80"],
-        }
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
 
         bat_80_global, r_bat80 = _bat_80_lcs(
             knob_global,
@@ -1403,6 +1469,14 @@ def compute_discrete_and_time_series(
             handedness=handedness,
             axis_backfill_indices=axis_backfill_indices,
         )
+        k80_global = bat_80_global
+        sweet_spot_origin_global = _sweet_spot_origin_global(
+            k80_global,
+            r_bat80,
+        )
+        metric_target_global = {
+            SWEET_SPOT_ORIGIN_NAME: sweet_spot_origin_global,
+        }
         confirmed, total, norm_min, norm_max = _r80_unit_vector_counts(r_bat80)
         r80_unit_vectors_confirmed += confirmed
         r80_unit_vectors_total += total
@@ -1418,23 +1492,27 @@ def compute_discrete_and_time_series(
         if np.isfinite(max_abs_dot):
             r80_max_abs_dot = max(r80_max_abs_dot, max_abs_dot)
 
-        ball_local = _global_to_bat_local(ball_global, bat_80_global, r_bat80)
-        knob_local = _global_to_bat_local(knob_global, bat_80_global, r_bat80)
-        top_local = _global_to_bat_local(top_global, bat_80_global, r_bat80)
+        ball_local = _global_to_bat_local(ball_global, sweet_spot_origin_global, r_bat80)
+        knob_local = _global_to_bat_local(knob_global, sweet_spot_origin_global, r_bat80)
+        top_local = _global_to_bat_local(top_global, sweet_spot_origin_global, r_bat80)
+        _check_bat_geometry_in_local_frame(knob_local, top_local, label=plot_id)
         ss_local = {
-            spot: _global_to_bat_local(position, bat_80_global, r_bat80)
-            for spot, position in ss_global.items()
+            spot: _global_to_bat_local(position, sweet_spot_origin_global, r_bat80)
+            for spot, position in metric_target_global.items()
         }
 
-        miss_global = {spot: ball_global - position for spot, position in ss_global.items()}
-        miss_local = {"K80": ball_local}
+        miss_global = {
+            spot: ball_global - position
+            for spot, position in metric_target_global.items()
+        }
+        miss_local = {SWEET_SPOT_ORIGIN_NAME: ball_local}
         distance_global = {
             spot: np.linalg.norm(vector, axis=0)
             for spot, vector in miss_global.items()
         }
         # Local missed distance uses the full local 3D miss-vector norm.
-        # Because R_80 is orthonormal, this should match the global K80
-        # distance at the same frame while preserving local X/Y/Z context.
+        # Because R_80 is orthonormal, this should match the global sweet-spot
+        # origin distance at the same frame while preserving local X/Y/Z context.
         distance_local = {
             spot: _local_selection_distance(vector)
             for spot, vector in miss_local.items()
@@ -1466,7 +1544,7 @@ def compute_discrete_and_time_series(
         bat_stop_idx = _window_end_index(df_pitch, frame_vec)
         ball_start_frame = event_times.get("BALL_START")
         if save_validation_plots and validation_plot_format != "none":
-            for spot in SWEET_SPOTS:
+            for spot in metric_target_global:
                 idx = _minimum_index_in_window(
                     distance_global[spot],
                     downswing_start_idx,
@@ -1485,9 +1563,9 @@ def compute_discrete_and_time_series(
                         idx,
                         frame=frame_vec,
                         pitch_id=plot_id,
-                        out_dir=VALIDATION_PLOT_ROOT / spot,
+                        out_dir=VALIDATION_PLOT_ROOT / SWEET_SPOT_ORIGIN_NAME,
                         ball_z=ball_global[2, :],
-                        target_z=ss_global[spot][2, :],
+                        target_z=metric_target_global[spot][2, :],
                         events=event_times,
                         ball_start_frame=ball_start_frame,
                     )
@@ -1496,12 +1574,12 @@ def compute_discrete_and_time_series(
                         ball_x=ball_global[0, :],
                         ball_y=ball_global[1, :],
                         ball_z=ball_global[2, :],
-                        target_x=ss_global[spot][0, :],
-                        target_y=ss_global[spot][1, :],
-                        target_z=ss_global[spot][2, :],
+                        target_x=metric_target_global[spot][0, :],
+                        target_y=metric_target_global[spot][1, :],
+                        target_z=metric_target_global[spot][2, :],
                         t_min=idx,
                         pitch_id=plot_id,
-                        out_dir=VALIDATION_PLOT_ROOT / spot,
+                        out_dir=VALIDATION_PLOT_ROOT / SWEET_SPOT_ORIGIN_NAME,
                         events=event_times,
                     )
 
@@ -1516,15 +1594,19 @@ def compute_discrete_and_time_series(
         jersey = meta_pitch.get("PLAYER_JERSEY_NUMBER", np.nan)
         gcs_path = meta_pitch.get("GCS_PATH", np.nan)
         meta_pitch["BATTER_NAME"] = parse_batter_name(gcs_path, jersey)
-        _fill_derived_report_tags(meta_pitch, outcome)
+        meta_pitch = {
+            OUTPUT_META_RENAMES.get(key, key): value
+            for key, value in meta_pitch.items()
+        }
 
         row: dict[str, object] = {
             **output_ids,
+            "HITTER_HANDEDNESS": hitter_handedness,
             "OUTCOME": outcome,
         }
         _add_start_data_positions(row, df_pitch, frame_vec)
 
-        for spot in SWEET_SPOTS:
+        for spot in metric_target_global:
             global_idx = _minimum_index_in_window(
                 distance_global[spot],
                 downswing_start_idx,
@@ -1536,21 +1618,24 @@ def compute_discrete_and_time_series(
                 bat_stop_idx,
             )
 
-            if global_idx is not None:
-                in_band = _axial_band_check(
-                    knob_global[:, global_idx],
-                    ball_global[:, global_idx],
-                    ss_positions["ss_top"][:, global_idx],
-                    ss_positions["ss_bottom"][:, global_idx],
-                )
-                row[f"IN_BAND_{spot}"] = (1 if in_band else 0) if outcome == "hit" else np.nan
-            else:
+            if global_idx is None:
                 logger.warning(
                     "%s/%s has no valid global distance from downswing to bat stop; discrete outputs will be NaN.",
                     plot_id,
                     spot,
                 )
-                row[f"IN_BAND_{spot}"] = np.nan
+
+            if local_idx is None:
+                row["IN_SWEET_SPOT_ZONE"] = np.nan
+            else:
+                row["IN_SWEET_SPOT_ZONE"] = (
+                    1
+                    if _sweet_spot_zone_check(
+                        local_y=float(miss_local[spot][1, local_idx]),
+                        local_z=float(miss_local[spot][2, local_idx]),
+                    )
+                    else 0
+                )
 
             _add_metrics_for_space(
                 row,
@@ -1565,7 +1650,7 @@ def compute_discrete_and_time_series(
                 ball_position=ball_global,
                 bat_knob_position=knob_global,
                 bat_top_position=top_global,
-                sweet_spot_position=ss_global[spot],
+                sweet_spot_position=metric_target_global[spot],
             )
             _add_window_max_metrics(
                 row,
@@ -1635,11 +1720,12 @@ def compute_discrete_and_time_series(
         for col in FOOT_ANKLE_COLS:
             if col in df_pitch.columns:
                 ts_data[col] = df_pitch[col].to_numpy(float)
-        for spot in SWEET_SPOTS:
+        for spot in metric_target_global:
             _add_time_series_spot_columns(
                 ts_data,
                 spot=spot,
-                ss_global=ss_global[spot],
+                k80_global=k80_global,
+                sweet_spot_origin_global=metric_target_global[spot],
                 miss_global=miss_global[spot],
                 miss_local=miss_local[spot],
                 distance_global=distance_global[spot],

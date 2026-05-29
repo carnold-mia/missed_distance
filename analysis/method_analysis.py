@@ -47,70 +47,70 @@ print(f"[INFO] Combined: {len(df)} total rows across {N_GAMES} games")
 #==============================================
 # define variables   
 #==============================================
-# 80% sweet spot md
-md_80_global_x = df['MISS_VECTOR_GLOBAL_K80_X']
-md_80_global_y = df['MISS_VECTOR_GLOBAL_K80_Y']
-md_80_global_z = df['MISS_VECTOR_GLOBAL_K80_Z']
-md_80_global = df['MISSED_DISTANCE_GLOBAL_K80']
+# Sweet spot origin missed distance
+md_sso_global_x = df['MISS_VECTOR_GLOBAL_X']
+md_sso_global_y = df['MISS_VECTOR_GLOBAL_Y']
+md_sso_global_z = df['MISS_VECTOR_GLOBAL_Z']
+md_sso_global = df['MISSED_DISTANCE_GLOBAL']
 
-md_80_local_x = df['MISS_VECTOR_LOCAL_K80_X']
-md_80_local_y = df['MISS_VECTOR_LOCAL_K80_Y']
-md_80_local_z = df['MISS_VECTOR_LOCAL_K80_Z']
-md_80_local = df['MISSED_DISTANCE_LOCAL_K80']
+md_sso_local_x = df['MISS_VECTOR_LOCAL_X']
+md_sso_local_y = df['MISS_VECTOR_LOCAL_Y']
+md_sso_local_z = df['MISS_VECTOR_LOCAL_Z']
+md_sso_local = df['MISSED_DISTANCE_LOCAL']
 
-# 80% sweet spot max velocity
-max_md_80_velocity_global_x = df['MAX_MISS_VELOCITY_K80_GLOBAL_X']
-max_md_80_velocity_global_y = df['MAX_MISS_VELOCITY_K80_GLOBAL_Y']
-max_md_80_velocity_global_z = df['MAX_MISS_VELOCITY_K80_GLOBAL_Z']
-max_md_80_speed_global = df['MAX_MISS_SPEED_K80_GLOBAL']
+# Sweet spot origin max velocity
+max_md_sso_velocity_global_x = df['MAX_MISS_VELOCITY_GLOBAL_X']
+max_md_sso_velocity_global_y = df['MAX_MISS_VELOCITY_GLOBAL_Y']
+max_md_sso_velocity_global_z = df['MAX_MISS_VELOCITY_GLOBAL_Z']
+max_md_sso_speed_global = df['MAX_MISS_SPEED_GLOBAL']
 
-max_md_80_velocity_local_x = df['MAX_MISS_VELOCITY_K80_LOCAL_X']
-max_md_80_velocity_local_y = df['MAX_MISS_VELOCITY_K80_LOCAL_Y']
-max_md_80_velocity_local_z = df['MAX_MISS_VELOCITY_K80_LOCAL_Z']
-max_md_80_speed_local = df['MAX_MISS_SPEED_K80_LOCAL']
+max_md_sso_velocity_local_x = df['MAX_MISS_VELOCITY_LOCAL_X']
+max_md_sso_velocity_local_y = df['MAX_MISS_VELOCITY_LOCAL_Y']
+max_md_sso_velocity_local_z = df['MAX_MISS_VELOCITY_LOCAL_Z']
+max_md_sso_speed_local = df['MAX_MISS_SPEED_LOCAL']
 
-tmin__global_k80 = df['T_MIN_GLOBAL_K80']
-tmin__local_k80 = df['T_MIN_LOCAL_K80']
+tmin_global_sso = df['T_MIN_GLOBAL']
+tmin_local_sso = df['T_MIN_LOCAL']
 
 #==============================================
 # data dictionary   
 #==============================================
 md_dict = {
-    '80': {
+    'SWEET_SPOT_ORIGIN': {
         'tmin': {
             'global': {
-                'tmin': tmin__global_k80
+                'tmin': tmin_global_sso
             },
             'local': {
-                'tmin': tmin__local_k80
+                'tmin': tmin_local_sso
             }
         },
         'position': {
             'global': {
-                'x': df['MISS_VECTOR_GLOBAL_K80_X'],
-                'y': df['MISS_VECTOR_GLOBAL_K80_Y'],
-                'z': df['MISS_VECTOR_GLOBAL_K80_Z'],
-                'mag': df['MISSED_DISTANCE_GLOBAL_K80']
+                'x': df['MISS_VECTOR_GLOBAL_X'],
+                'y': df['MISS_VECTOR_GLOBAL_Y'],
+                'z': df['MISS_VECTOR_GLOBAL_Z'],
+                'mag': df['MISSED_DISTANCE_GLOBAL']
             },
             'local': {
-                'x': df['MISS_VECTOR_LOCAL_K80_X'],
-                'y': df['MISS_VECTOR_LOCAL_K80_Y'],
-                'z': df['MISS_VECTOR_LOCAL_K80_Z'],
-                'mag': df['MISSED_DISTANCE_LOCAL_K80']
+                'x': df['MISS_VECTOR_LOCAL_X'],
+                'y': df['MISS_VECTOR_LOCAL_Y'],
+                'z': df['MISS_VECTOR_LOCAL_Z'],
+                'mag': df['MISSED_DISTANCE_LOCAL']
             }
         },
         'velocity': {
             'global': {
-                'x': df['MAX_MISS_VELOCITY_K80_GLOBAL_X'],
-                'y': df['MAX_MISS_VELOCITY_K80_GLOBAL_Y'],
-                'z': df['MAX_MISS_VELOCITY_K80_GLOBAL_Z'],
-                'mag': df['MAX_MISS_SPEED_K80_GLOBAL']
+                'x': df['MAX_MISS_VELOCITY_GLOBAL_X'],
+                'y': df['MAX_MISS_VELOCITY_GLOBAL_Y'],
+                'z': df['MAX_MISS_VELOCITY_GLOBAL_Z'],
+                'mag': df['MAX_MISS_SPEED_GLOBAL']
             },
             'local': {
-                'x': df['MAX_MISS_VELOCITY_K80_LOCAL_X'],
-                'y': df['MAX_MISS_VELOCITY_K80_LOCAL_Y'],
-                'z': df['MAX_MISS_VELOCITY_K80_LOCAL_Z'],
-                'mag': df['MAX_MISS_SPEED_K80_LOCAL']
+                'x': df['MAX_MISS_VELOCITY_LOCAL_X'],
+                'y': df['MAX_MISS_VELOCITY_LOCAL_Y'],
+                'z': df['MAX_MISS_VELOCITY_LOCAL_Z'],
+                'mag': df['MAX_MISS_SPEED_LOCAL']
             }
         }
     }
@@ -157,8 +157,8 @@ def one_to_one_plot(x: pd.Series, y: pd.Series, title: str, xlabel: str, ylabel:
 # Execute Loops (Calculate Residuals & Plot)
 #==============================================
 
-for k in md_dict.keys(): # Loop through sweet spots (e.g., '80')
-    # Create the target directory for the current sweet spot if it doesn't exist
+for k in md_dict.keys(): # Loop through metric origins.
+    # Create the target directory for the current metric origin if it doesn't exist
     save_dir = os.path.join(PATH, 'figures', 'method')
     os.makedirs(save_dir, exist_ok=True)
 
@@ -213,7 +213,7 @@ for k in md_dict.keys(): # Loop through sweet spots (e.g., '80')
 
             # 1. Generate and Save One-to-One Plot
             title_1to1 = (
-                f"Sweet Spot {k}% | {metric_label} - Global ({global_label}) vs Local ({local_label})"
+                f"{k} | {metric_label} - Global ({global_label}) vs Local ({local_label})"
                 f"  [{N_GAMES} games, n={len(global_series.dropna())}]"
             )
             xlabel_1to1 = f"Global {metric_label} {global_label}"
@@ -223,7 +223,7 @@ for k in md_dict.keys(): # Loop through sweet spots (e.g., '80')
 
             # 2. Generate and Save Residual Distribution Plot
             title_res = (
-                f"Sweet Spot {k}% | {metric_label} Residuals [Local ({local_label}) - Global ({global_label})]"
+                f"{k} | {metric_label} Residuals [Local ({local_label}) - Global ({global_label})]"
                 f"  [{N_GAMES} games, n={len(residuals.dropna())}]"
             )
             xlabel_res = f"Residual {metric_label} (Local {local_label} - Global {global_label})"

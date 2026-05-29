@@ -61,6 +61,18 @@ df_merged = pd.merge(
 # Drop the redundant right-side join key now that the merge is complete
 df_merged = df_merged.drop(columns=['mlbam_guid'])
 
+
+def outcome_mask(df: pd.DataFrame, label: str) -> pd.Series:
+    """Return rows matching the canonical OUTCOME label, with legacy fallback."""
+    if 'OUTCOME' in df.columns:
+        outcome = df['OUTCOME'].astype(str).str.strip().str.upper()
+        aliases = {'BALL_CONTACT': {'BALL_CONTACT', 'HIT'}}
+        return outcome.isin(aliases.get(label, {label}))
+    if label in df.columns:
+        return df[label] == label
+    return pd.Series(False, index=df.index)
+
+
 # --- Step 5: Validate match counts per game so silent failures are visible ----
 n_matched_total = df_merged['xwobacon_ev_la'].notna().sum()
 print(f"\n[INFO] Match summary (barrel contacts with xwOBA data):")
@@ -147,8 +159,8 @@ def correlation_scatter_plot(x: pd.Series, y: pd.Series, title: str, xlabel: str
 # =============================================================================
 # Pull columns and validate presence before plotting
 # =============================================================================
-md_speed_global = df_merged['MAX_MISS_SPEED_K80_GLOBAL']
-md_speed_local  = df_merged['MAX_MISS_SPEED_K80_LOCAL']
+md_speed_global = df_merged['MAX_MISS_SPEED_GLOBAL']
+md_speed_local  = df_merged['MAX_MISS_SPEED_LOCAL']
 xwobacon_ev_la  = df_merged['xwobacon_ev_la']
 
 # Flag suspicious local-speed outliers — local >> global on same swing implies
@@ -161,8 +173,8 @@ if n_outliers > 0:
         "possible numerical instability in local MD method. Review these rows:"
     )
     print(df_merged.loc[outlier_mask, ['source_game_id', 'MLBAM_GUID',
-                                       'MAX_MISS_SPEED_K80_GLOBAL',
-                                       'MAX_MISS_SPEED_K80_LOCAL']].to_string(index=False))
+                                       'MAX_MISS_SPEED_GLOBAL',
+                                       'MAX_MISS_SPEED_LOCAL']].to_string(index=False))
 
 save_dir = os.path.join(PATH, 'figures/md_velocity_exploration')
 os.makedirs(save_dir, exist_ok=True)
@@ -211,7 +223,7 @@ if not TS_GUID:
     discrete_game_path = os.path.join(PATH, f'data/discrete/{TS_GAME_ID}_discrete.csv')
     df_disc = pd.read_csv(discrete_game_path)
     contact_guids = df_disc.loc[
-        df_disc['BALL_CONTACT'] == 'BALL_CONTACT', 'MLBAM_GUID'
+        outcome_mask(df_disc, 'BALL_CONTACT'), 'MLBAM_GUID'
     ].tolist()
     if not contact_guids:
         raise ValueError(f"[ERROR] No BALL_CONTACT rows found in {TS_GAME_ID}_discrete.csv")
@@ -229,14 +241,14 @@ df_trial = df_trial.sort_values('FRAME').reset_index(drop=True)
 print(f"[INFO] Trial frames: {int(df_trial['FRAME'].min())} → {int(df_trial['FRAME'].max())}  "
       f"(n={len(df_trial)} frames)")
 
-# --- Retrieve tmin_k80 for this trial (vertical reference line) ------------
+# --- Retrieve sweet-spot-origin T-min for this trial (vertical reference line) ------------
 tmin_row = df_disc[df_disc['MLBAM_GUID'] == TS_GUID] if 'df_disc' in dir() else pd.DataFrame()
-if not tmin_row.empty and 'T_MIN_GLOBAL_K80' in tmin_row.columns:
-    tmin_frame = float(tmin_row['T_MIN_GLOBAL_K80'].iloc[0])
-    print(f"[INFO] T_MIN_GLOBAL_K80 (frame of minimum miss distance): {tmin_frame:.0f}")
+if not tmin_row.empty and 'T_MIN_GLOBAL' in tmin_row.columns:
+    tmin_frame = float(tmin_row['T_MIN_GLOBAL'].iloc[0])
+    print(f"[INFO] T_MIN_GLOBAL (frame of minimum miss distance): {tmin_frame:.0f}")
 else:
-    # Fall back: frame where MISSED_DISTANCE_GLOBAL_K80 is smallest
-    dist_col = 'MISSED_DISTANCE_GLOBAL_K80'
+    # Fall back: frame where MISSED_DISTANCE_GLOBAL is smallest
+    dist_col = 'MISSED_DISTANCE_GLOBAL'
     valid = df_trial[dist_col].dropna()
     tmin_frame = float(df_trial.loc[valid.idxmin(), 'FRAME']) if not valid.empty else None
     print(f"[INFO] tmin_frame derived from min({dist_col}): {tmin_frame}")
@@ -248,7 +260,7 @@ os.makedirs(ts_save_dir, exist_ok=True)
 
 # =============================================================================
 # Figure A — Ball-in-bat position (X, Y, Z) over time
-# These are the ball coordinates expressed in the bat's local coordinate frame:
+# These are ball coordinates expressed in the SWEET_SPOT_ORIGIN local frame:
 #   X  —  depth (in/out face of barrel)
 #   Y  —  along bat length (barrel → knob)
 #   Z  —  across bat width (top / bottom)
@@ -296,16 +308,16 @@ plt.close(fig_a)
 # it suggests the swing was decelerating through contact.
 # =============================================================================
 VEL_COLS   = [
-    'MISS_VECTOR_VELOCITY_GLOBAL_K80_X',
-    'MISS_VECTOR_VELOCITY_GLOBAL_K80_Y',
-    'MISS_VECTOR_VELOCITY_GLOBAL_K80_Z',
-    'MISSED_DISTANCE_GLOBAL_K80_SPEED',   # scalar magnitude
+    'MISS_VELOCITY_GLOBAL_X',
+    'MISS_VELOCITY_GLOBAL_Y',
+    'MISS_VELOCITY_GLOBAL_Z',
+    'MISS_SPEED_GLOBAL',   # scalar magnitude
 ]
 VEL_LABELS = [
     'Velocity X — Global (m/s)',
     'Velocity Y — Global (m/s)',
     'Velocity Z — Global (m/s)',
-    'Scalar MD Speed — Global (m/s)',
+    'Miss Speed — Global (m/s)',
 ]
 VEL_COLORS = ['#1f77b4', '#2ca02c', '#d62728', '#ff7f0e']
 

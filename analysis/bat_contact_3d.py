@@ -56,10 +56,11 @@ BAT_KNOB_X     = -0.8536   # far end of knob
 BAT_BARREL_R   =  0.0465   # straight barrel radius
 BAT_HANDLE_R   =  0.012    # handle radius
 BAT_KNOB_R     =  0.025    # knob cap radius
+BAT_CENTER_Z   = -0.01     # bat centreline in SWEET_SPOT_ORIGIN local Z
 
-# --- 80 % sweet spot definition ------------------------------
+# --- Sweet spot origin definition ----------------------------
 SS_ORIGIN_Y    =  0.0      # m  along bat
-SS_ORIGIN_Z    =  0.01     # m  above centreline
+SS_ORIGIN_Z    =  0.0      # m  across bat
 SS_SEMI_MAJOR  =  0.06     # m  half-length along Y
 SS_SEMI_MINOR  =  0.04     # m  half-width along Z
 
@@ -142,42 +143,48 @@ def bat_radius_at_y(y: float) -> float:
 
 def project_sweet_spot_to_surface(n_t: int = 400) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Project the sweet spot ellipse boundary onto the physical barrel surface.
+    Project the sweet spot ellipse boundary onto the physical barrel surface
+    using angular wrapping so the curve forms a complete closed oval.
 
-    The ellipse is defined in the Y-Z plane (same as the 2D plots):
-        Y(t) = SS_ORIGIN_Y + SS_SEMI_MAJOR * cos(t)
-        Z(t) = SS_ORIGIN_Z + SS_SEMI_MINOR * sin(t)
+    The 2D ellipse (Y-Z plane) defines the footprint in the
+    SWEET_SPOT_ORIGIN local frame. SS_ORIGIN_Z is converted to a bat-centreline
+    relative angle before being mapped back to local Z.
 
-    Each point is lifted onto the barrel surface by computing:
-        X = +sqrt(R(Y)² − Z²)
-    which places it on the front hemisphere of the bat (the side facing
-    the incoming pitch).  Z values that would exceed the barrel radius
-    are clamped to the surface edge so the curve stays on the bat.
+    Angle mapping per Y slice:
+        θ_centre = arcsin(clip((SS_ORIGIN_Z - BAT_CENTER_Z) / R, −1, 1))
+        θ_half   = arcsin(clip(SS_SEMI_MINOR  / R, −1, 1))
+        θ(t)     = θ_centre + θ_half * sin(t)
+        X(t)     = R * cos(θ(t))
+        Z(t)     = R * sin(θ(t))
 
     Returns (ss_y, ss_x, ss_z) — three 1-D arrays ready for ax.plot().
     """
-    t      = np.linspace(0, 2 * np.pi, n_t)
-    ss_y   = SS_ORIGIN_Y + SS_SEMI_MAJOR * np.cos(t)
-    ss_z_raw = SS_ORIGIN_Z + SS_SEMI_MINOR * np.sin(t)
+    t    = np.linspace(0, 2 * np.pi, n_t)
+    ss_y = SS_ORIGIN_Y + SS_SEMI_MAJOR * np.cos(t)
 
     ss_x = np.empty(n_t)
     ss_z = np.empty(n_t)
-    for i, (y_val, z_raw) in enumerate(zip(ss_y, ss_z_raw)):
-        R          = bat_radius_at_y(y_val)
-        z_clamped  = float(np.clip(z_raw, -R, R))   # keep point on the barrel
-        ss_z[i]    = z_clamped
-        ss_x[i]    = np.sqrt(max(0.0, R ** 2 - z_clamped ** 2))  # front hemisphere
+    for i, (y_val, t_val) in enumerate(zip(ss_y, t)):
+        R           = bat_radius_at_y(y_val)
+        # Convert Z position/extent to angles — stays on surface even when Z > R
+        theta_cen   = np.arcsin(np.clip((SS_ORIGIN_Z - BAT_CENTER_Z) / R, -1.0, 1.0))
+        theta_half  = np.arcsin(np.clip(SS_SEMI_MINOR / R, -1.0, 1.0))
+        theta       = theta_cen + theta_half * np.sin(t_val)
+        ss_x[i]     = R * np.cos(theta)
+        ss_z[i]     = BAT_CENTER_Z + R * np.sin(theta)
 
     return ss_y, ss_x, ss_z
 
 
 def build_sweet_spot_patch(n_y: int = 50, n_z: int = 25) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Build a filled surface patch for the sweet spot region on the barrel.
+    Build a filled surface patch for the sweet spot region on the barrel
+    using angular wrapping so the patch curves properly over the top of
+    the bat rather than being clipped at the barrel edge.
 
-    For each Y slice through the ellipse the Z extent of the ellipse at
-    that Y is computed, then each Z value within that range is lifted onto
-    the barrel surface exactly as in project_sweet_spot_to_surface.
+    For each Y slice the angular half-width is scaled by the ellipse
+    factor sqrt(1 − dy²), matching the elliptical footprint in plan view.
+    Angles are then mapped to (X, Z) on the local cross-section circle.
 
     Returns (Y_patch, X_patch, Z_patch) — 2-D arrays of shape (n_y, n_z)
     suitable for ax.plot_surface().
@@ -189,18 +196,18 @@ def build_sweet_spot_patch(n_y: int = 50, n_z: int = 25) -> tuple[np.ndarray, np
     Z_patch = np.empty((n_y, n_z))
 
     for i, y_val in enumerate(y_vals):
-        # Half-width of the ellipse at this Y slice
-        dy      = (y_val - SS_ORIGIN_Y) / SS_SEMI_MAJOR
-        z_half  = SS_SEMI_MINOR * np.sqrt(max(0.0, 1.0 - dy ** 2))
-        z_vals  = np.linspace(SS_ORIGIN_Z - z_half, SS_ORIGIN_Z + z_half, n_z)
-
-        R = bat_radius_at_y(y_val)
-        z_clamped = np.clip(z_vals, -R, R)
-        x_vals    = np.sqrt(np.maximum(0.0, R ** 2 - z_clamped ** 2))
-
+        R        = bat_radius_at_y(y_val)
+        dy       = (y_val - SS_ORIGIN_Y) / SS_SEMI_MAJOR
+        # Full angular half-width at barrel radius, scaled by ellipse factor
+        theta_cen  = np.arcsin(np.clip((SS_ORIGIN_Z - BAT_CENTER_Z) / R, -1.0, 1.0))
+        theta_half = np.arcsin(np.clip(SS_SEMI_MINOR / R, -1.0, 1.0))
+        theta_half_local = theta_half * np.sqrt(max(0.0, 1.0 - dy ** 2))
+        # Sweep angles from −half to +half around the centre angle
+        thetas = np.linspace(theta_cen - theta_half_local,
+                             theta_cen + theta_half_local, n_z)
         Y_patch[i, :] = y_val
-        X_patch[i, :] = x_vals
-        Z_patch[i, :] = z_clamped
+        X_patch[i, :] = R * np.cos(thetas)
+        Z_patch[i, :] = BAT_CENTER_Z + R * np.sin(thetas)
 
     return Y_patch, X_patch, Z_patch
 
@@ -244,7 +251,7 @@ def build_bat_surface_mesh() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     # Revolve: X and Z are the two perpendicular cross-section axes
     X_mesh = R_mesh * np.cos(Theta)
-    Z_mesh = R_mesh * np.sin(Theta)
+    Z_mesh = BAT_CENTER_Z + R_mesh * np.sin(Theta)
 
     return Y_mesh, X_mesh, Z_mesh
 
@@ -281,9 +288,19 @@ df_merged = pd.merge(
 )
 df_merged = df_merged.drop(columns=['mlbam_guid'])
 
-# BALL_CONTACT is a string sentinel ('BALL_CONTACT') not a boolean —
-# matches the filter pattern used in xwoba_barrels.py.
-df_contact = df_merged[df_merged['BALL_CONTACT'] == 'BALL_CONTACT'].copy()
+def outcome_mask(df: pd.DataFrame, label: str) -> pd.Series:
+    """Return rows matching the canonical OUTCOME label, with legacy fallback."""
+    if 'OUTCOME' in df.columns:
+        outcome = df['OUTCOME'].astype(str).str.strip().str.upper()
+        aliases = {'BALL_CONTACT': {'BALL_CONTACT', 'HIT'}}
+        return outcome.isin(aliases.get(label, {label}))
+    if label in df.columns:
+        return df[label] == label
+    return pd.Series(False, index=df.index)
+
+
+# All ball-contact rows (xwOBA may be NaN for non-barrel contacts).
+df_contact = df_merged[outcome_mask(df_merged, 'BALL_CONTACT')].copy()
 df_plot    = df_contact.dropna(subset=['xwobacon_ev_la'])
 df_plot    = df_plot[df_plot['xwobacon_ev_la'] >= XWOBA_MIN_3D].copy()
 print(
@@ -297,9 +314,9 @@ VMIN = df_merged['xwobacon_ev_la'].min()
 VMAX = df_merged['xwobacon_ev_la'].max()
 
 # Pull the three contact coordinates into plain arrays for clarity
-y_pts = df_plot['BALL_IN_BAT_AT_TMIN_K80_Y'].values
-x_pts = df_plot['BALL_IN_BAT_AT_TMIN_K80_X'].values
-z_pts = df_plot['BALL_IN_BAT_AT_TMIN_K80_Z'].values
+y_pts = df_plot['MISS_VECTOR_LOCAL_Y'].values
+x_pts = df_plot['MISS_VECTOR_LOCAL_X'].values
+z_pts = df_plot['MISS_VECTOR_LOCAL_Z'].values
 c_pts = df_plot['xwobacon_ev_la'].values
 
 print(f"[INFO] X contact range (in-out depth): {x_pts.min():.4f} → {x_pts.max():.4f} m")
@@ -372,7 +389,7 @@ ax1.plot(ss_y, ss_x, ss_z, color='red', linewidth=2.5, label='Target Zone', zord
 ax1.plot(
     [SS_ORIGIN_Y, SS_ORIGIN_Y],
     [-XZ_LIM, XZ_LIM],
-    [0, 0],
+    [SS_ORIGIN_Z, SS_ORIGIN_Z],
     color='red', linestyle=':', linewidth=1.5, alpha=0.5,
 )
 
@@ -411,11 +428,11 @@ fig2, (ax_end, ax_top) = plt.subplots(1, 2, figsize=(16, 6))
 theta_ref = np.linspace(0, 2 * np.pi, 300)
 ax_end.plot(
     BAT_BARREL_R * np.cos(theta_ref),
-    BAT_BARREL_R * np.sin(theta_ref),
+    BAT_CENTER_Z + BAT_BARREL_R * np.sin(theta_ref),
     color='#5C4033', linewidth=1.5, alpha=0.6, label='Barrel edge',
 )
-# Centreline crosshairs
-ax_end.axhline(0, color='gray', linewidth=0.8, linestyle='--', alpha=0.4)
+# Centreline crosshairs in the SWEET_SPOT_ORIGIN frame.
+ax_end.axhline(BAT_CENTER_Z, color='gray', linewidth=0.8, linestyle='--', alpha=0.4)
 ax_end.axvline(0, color='gray', linewidth=0.8, linestyle='--', alpha=0.4)
 
 sc_end = ax_end.scatter(
@@ -431,8 +448,8 @@ ax_end.set_aspect('equal')
 
 # --- Right: top-down view (Y-Z plane) --------------------------------
 # Barrel radius reference lines (same as 2D plots)
-ax_top.axhline( BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
-ax_top.axhline(-BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
+ax_top.axhline(BAT_CENTER_Z + BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
+ax_top.axhline(BAT_CENTER_Z - BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
 ax_top.axvline(SS_ORIGIN_Y, color='red', linestyle=':', linewidth=1.8, alpha=0.7)
 
 # Sweet spot ellipse in Y-Z

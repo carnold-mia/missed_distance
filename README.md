@@ -1,6 +1,6 @@
 # Missed Distance Pipeline
 
-Hitting-only pipeline for pulling Kinatrax batting motion data, normalizing it to MLBAM identifiers, computing K80 missed-distance metrics, and writing discrete and frame-level CSV outputs.
+Hitting-only pipeline for pulling Kinatrax batting motion data, normalizing it to MLBAM identifiers, computing sweet-spot-origin missed-distance metrics, and writing discrete and frame-level CSV outputs.
 
 The active pipeline is:
 
@@ -9,11 +9,96 @@ Snowflake or cached CSV
   -> MLBAM hitting normalization
   -> optional hitting-report merge
   -> BAT_80 local coordinate system
-  -> local/global K80 miss vectors, distances, velocities, and speeds
+  -> SWEET_SPOT_ORIGIN local/global miss vectors, distances, velocities, and speeds
   -> results/discrete + results/time_series + outcome counts
 ```
 
-For the short command-only version, see [QUICKSTART.md](QUICKSTART.md).
+## Quick Start
+
+Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+export MPLCONFIGDIR=/private/tmp   # optional on macOS — avoids Matplotlib cache warnings
+```
+
+Run the default game list:
+
+```bash
+MPLCONFIGDIR=/private/tmp python missed_distance.py --skip-validation-plots
+```
+
+Run one game:
+
+```bash
+MPLCONFIGDIR=/private/tmp python missed_distance.py \
+  --game-id 822820 \
+  --skip-validation-plots
+```
+
+Run one trial:
+
+```bash
+MPLCONFIGDIR=/private/tmp python missed_distance.py \
+  --game-id 822820 \
+  --guid 2597eb35-5407-3aee-9ea9-5131e21139ac \
+  --skip-validation-plots
+```
+
+Run multiple games:
+
+```bash
+MPLCONFIGDIR=/private/tmp python missed_distance.py \
+  --game-id 824358 824599 822981 823384 \
+  --game-chunk-size 1 \
+  --continue-on-error \
+  --skip-validation-plots
+```
+
+Force a fresh Snowflake pull (only when cache exists and you want to overwrite it):
+
+```bash
+MPLCONFIGDIR=/private/tmp python missed_distance.py \
+  --game-id 822820 \
+  --force \
+  --skip-validation-plots
+```
+
+Outputs:
+
+```text
+results/discrete/<RUN_LABEL>_discrete.csv
+results/time_series/<RUN_LABEL>_time_series.csv
+results/<RUN_LABEL>_outcome_counts.csv
+
+data/<GAME_ID>/motion_sequence.csv      # raw pull / cache
+data/<GAME_ID>/hitting_report.csv
+```
+
+Launch the viewer:
+
+```bash
+MPLCONFIGDIR=/private/tmp python viewer/hitting_viewer_app.py \
+  data/822820/motion_sequence.csv \
+  --port 5001
+```
+
+Open `http://127.0.0.1:5001`.
+
+Run tests:
+
+```bash
+MPLCONFIGDIR=/private/tmp pytest
+```
+
+This pipeline computes:
+
+- Sweet-spot-origin missed distance
+- Global miss vector: `BALL - SWEET_SPOT_ORIGIN`
+- Local miss vector: `BALL_IN_BAT`, with `SWEET_SPOT_ORIGIN` as the local origin and copied `R_80` orientation
+- Local/global distances, velocities, and speeds
+- Direction flags: `CAPPED`, `JAMMED`, `SWUNG_OVER`, `SWUNG_UNDER`
+- Sweet spot zone flag: `IN_SWEET_SPOT_ZONE`
 
 ## Current Scope
 
@@ -23,8 +108,11 @@ Current behavior:
 
 - Metadata: `MLBAM_GAME_ID` + `MLBAM_GUID`.
   - `SESSION_ID` and `PITCH_ID` are retained internally for cache/report joins, but are not emitted in the final discrete or time-series outputs.
-- K80 is treated as the sweet spot.
-  - This is because all Kinatrax bat speed variables are derived relative to the 80% bat length
+- K80/BAT_80 is retained as the orientation and time-series reference point.
+- `SWEET_SPOT_ORIGIN` is the metric target origin:
+  - same `R_80` orientation as K80
+  - translated `+0.01 m` along local `Z`
+  - used for all miss vectors, distances, T-mins, direction flags, and sweet-spot-zone checks
 - Output format: CSV
 
 ## Repository Layout
@@ -57,28 +145,18 @@ results/discrete/<RUN_LABEL>_discrete.csv
 results/time_series/<RUN_LABEL>_time_series.csv
 results/<RUN_LABEL>_outcome_counts.csv
 
-fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/K80/   # only when plots are enabled
+fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/SWEET_SPOT_ORIGIN/   # only when plots are enabled
 ```
 
 ## Setup
 
-Use the Python environment that has the project dependencies installed. The pipeline uses:
-
-- `pandas`
-- `numpy`
-- `scipy`
-- `matplotlib`
-- `plotly`
-- `snowflake-connector-python`
-- `python-dotenv` optional, for loading `.env`
-- `flask` for the viewer
-- `pytest` for tests
-
-Example install line if you are in a clean environment:
+Install pinned dependencies from `requirements.txt`:
 
 ```bash
-pip install pandas numpy scipy matplotlib plotly snowflake-connector-python python-dotenv flask pytest
+python -m pip install -r requirements.txt
 ```
+
+Core packages: `pandas`, `numpy`, `scipy`, `matplotlib`, `plotly`, `snowflake-connector-python`, `python-dotenv`, `flask`, `pytest`. Analysis scripts also use `seaborn` and `statsmodels` (included in `requirements.txt`).
 
 For macOS/Codex runs, setting `MPLCONFIGDIR` avoids Matplotlib/font cache write warnings:
 
@@ -267,6 +345,7 @@ SWING
 MISS
 BALL_CONTACT
 CHECK_SWING
+BAD
 DOWNSWING
 BALL_MIN
 BAT_STOP
@@ -274,11 +353,13 @@ R
 L
 ```
 
-Take pitches are skipped from missed-distance computation and counted in outcome counts.
+Raw `R`/`L` flags are collapsed into the discrete `HITTER_HANDEDNESS` column (`R`, `L`, or `AMBIGUOUS` when both are set). Raw event flags are collapsed into `OUTCOME`: `BALL_CONTACT`, `MISS`, `CHECK_SWING`, or `BAD`. The raw `R`, `L`, `BAD`, `TAKE`, `SWING`, `MISS`, `BALL_CONTACT`, and `CHECK_SWING` report columns are not emitted in pipeline outputs.
+
+Take pitches and rows with no report event are skipped from missed-distance computation and counted in outcome counts.
 
 ## BAT_80 Local Coordinate System
 
-The local frame is centered at the K80 sweet spot:
+`BAT_80` is the pipeline's 80% reference point and orientation source:
 
 ```python
 BAT_80 = KNOB + 0.80 * (TOP - KNOB)
@@ -321,46 +402,54 @@ Those checks confirm that the axes have norm 1 and that `X/Y`, `Y/Z`, and `X/Z` 
 
 ## Missed Distance Method
 
-Global K80:
+The metric origin is a copy of the K80 frame translated `+0.01 m` along local `Z`:
 
 ```python
-SS_K80_GLOBAL = KNOB + 0.80 * (TOP - KNOB)
-MISS_VECTOR_GLOBAL_K80 = BALL_GLOBAL - SS_K80_GLOBAL
-MISSED_DISTANCE_GLOBAL_K80_BY_FRAME = norm(MISS_VECTOR_GLOBAL_K80)
-
-T_MIN_GLOBAL_K80_IDX = argmin(
-    MISSED_DISTANCE_GLOBAL_K80_BY_FRAME[downswing_idx:bat_stop_idx]
-)
-MISSED_DISTANCE_GLOBAL_K80 = MISSED_DISTANCE_GLOBAL_K80_BY_FRAME[T_MIN_GLOBAL_K80_IDX]
+K80_GLOBAL = BAT_80
+SWEET_SPOT_ORIGIN_GLOBAL = K80_GLOBAL + R_80 @ [0.0, 0.0, 0.01]
+SWEET_SPOT_ORIGIN_ORIENTATION = R_80
 ```
 
-Local K80:
+Global missed distance:
 
 ```python
-BALL_IN_BAT = R_80.T @ (BALL_GLOBAL - BAT_80)
-MISS_VECTOR_LOCAL_K80 = BALL_IN_BAT
+MISS_VECTOR_GLOBAL = BALL_GLOBAL - SWEET_SPOT_ORIGIN_GLOBAL
+MISSED_DISTANCE_GLOBAL_BY_FRAME = norm(MISS_VECTOR_GLOBAL)
 
-# Local T-min selection uses the full local 3D miss vector.
-LOCAL_3D_DISTANCE_K80_BY_FRAME = norm(MISS_VECTOR_LOCAL_K80)
-T_MIN_LOCAL_K80_IDX = argmin(
-    LOCAL_3D_DISTANCE_K80_BY_FRAME[downswing_idx:bat_stop_idx]
+T_MIN_GLOBAL_IDX = argmin(
+    MISSED_DISTANCE_GLOBAL_BY_FRAME[downswing_idx:bat_stop_idx]
+)
+MISSED_DISTANCE_GLOBAL = MISSED_DISTANCE_GLOBAL_BY_FRAME[T_MIN_GLOBAL_IDX]
+```
+
+Local missed distance:
+
+```python
+BALL_IN_BAT = R_80.T @ (BALL_GLOBAL - SWEET_SPOT_ORIGIN_GLOBAL)
+
+# Time-series output keeps BALL_IN_BAT as the ball position in the
+# SWEET_SPOT_ORIGIN local frame.
+# Discrete output keeps the same vector as MISS_VECTOR_LOCAL at T_MIN_LOCAL.
+LOCAL_3D_DISTANCE_BY_FRAME = norm(BALL_IN_BAT)
+T_MIN_LOCAL_IDX = argmin(
+    LOCAL_3D_DISTANCE_BY_FRAME[downswing_idx:bat_stop_idx]
 )
 
 # Local missed distance is the full local 3D norm at that same frame.
-MISSED_DISTANCE_LOCAL_K80 =
-    LOCAL_3D_DISTANCE_K80_BY_FRAME[T_MIN_LOCAL_K80_IDX]
+MISSED_DISTANCE_LOCAL =
+    LOCAL_3D_DISTANCE_BY_FRAME[T_MIN_LOCAL_IDX]
 ```
 
-Because `BAT_80` is the local origin, the local K80 sweet spot is `(0, 0, 0)`. The local vector is recorded as full `X/Y/Z`, and the local distance is the full 3D norm of that vector. Since `R_80` is orthonormal, the local 3D distance should match the global K80 distance at the same frame while still preserving the local axis interpretation.
+Because `SWEET_SPOT_ORIGIN` is the local origin, the target point is `(0, 0, 0)` in local coordinates. In time series, `BALL_IN_BAT_X/Y/Z` is the ball position expressed in that copied `R_80` frame. In discrete output, `MISS_VECTOR_LOCAL_X/Y/Z` records that same local vector at `T_MIN_LOCAL`. Since `R_80` is orthonormal, the local 3D distance should match the global sweet-spot-origin distance at the same frame while still preserving the local axis interpretation.
 
 Current T-min selection:
 
 - Search window starts at `DOWNSWING`, then `DS`, then `START_DATA`, then frame 0.
 - Search window ends at `BAT_STOP`, otherwise the final frame.
-- `T_MIN_LOCAL_K80` is selected from `sqrt(X^2 + Y^2 + Z^2)` in bat-local space.
-- `T_MIN_GLOBAL_K80` is selected from the global K80 scalar distance.
-- `MISSED_DISTANCE_LOCAL_K80` is computed after local T-min from `sqrt(X^2 + Y^2 + Z^2)`.
-- `MISSED_DISTANCE_GLOBAL_K80` is computed at global T-min from `sqrt(X^2 + Y^2 + Z^2)`.
+- `T_MIN_LOCAL` is selected from `sqrt(X^2 + Y^2 + Z^2)` in bat-local space.
+- `T_MIN_GLOBAL` is selected from the global sweet-spot-origin scalar distance.
+- `MISSED_DISTANCE_LOCAL` is computed after local T-min from `sqrt(X^2 + Y^2 + Z^2)`.
+- `MISSED_DISTANCE_GLOBAL` is computed at global T-min from `sqrt(X^2 + Y^2 + Z^2)`.
 
 ## Velocity, Speed, And Filtering
 
@@ -387,8 +476,8 @@ speed = norm(filtered_velocity_xyz)
 This is applied to both:
 
 ```text
-MISS_VECTOR_LOCAL_K80
-MISS_VECTOR_GLOBAL_K80
+BALL_IN_BAT / MISS_VECTOR_LOCAL
+MISS_VECTOR_GLOBAL
 ```
 
 For short series that cannot support `filtfilt` padding, the filter returns the input unchanged.
@@ -400,20 +489,42 @@ The discrete output includes four local miss direction flags after metadata:
 ```text
 CAPPED
 JAMMED
-OVER
-UNDER
+SWUNG_OVER
+SWUNG_UNDER
 ```
 
-They are based on `MISS_VECTOR_LOCAL_K80` at `T_MIN_LOCAL_K80`:
+They are based on `MISS_VECTOR_LOCAL` at `T_MIN_LOCAL`:
 
 ```text
 CAPPED = 1 if local Y > 0 else 0
 JAMMED = 1 if local Y < 0 else 0
-OVER   = 1 if local Z < 0 else 0
-UNDER  = 1 if local Z > 0 else 0
+SWUNG_OVER  = 1 if local Z > 0 else 0
+SWUNG_UNDER = 1 if local Z < 0 else 0
 ```
 
-`CAPPED` and `JAMMED` cannot both be true. `OVER` and `UNDER` cannot both be true. One horizontal and one vertical flag can both be true.
+`CAPPED` and `JAMMED` cannot both be true. `SWUNG_OVER` and `SWUNG_UNDER` cannot both be true. One horizontal and one vertical flag can both be true.
+
+The vertical flags are swing-relative to the ball: because `MISS_VECTOR_LOCAL` is ball minus sweet spot, positive local `Z` means the bat/sweet spot was on the over side of the ball (`SWUNG_OVER`), while negative local `Z` means it was on the under side (`SWUNG_UNDER`).
+
+## Sweet Spot Zone Flag
+
+The discrete output includes `IN_SWEET_SPOT_ZONE`, based on `MISS_VECTOR_LOCAL` at `T_MIN_LOCAL`.
+
+The zone is an unclipped local Y/Z ellipse centered on `SWEET_SPOT_ORIGIN`:
+
+```text
+semi-major axis: Y +/- 0.06 m
+semi-minor axis: Z +/- 0.04 m
+center: Y = 0.00 m, Z = 0.00 m
+```
+
+The boolean is true when:
+
+```text
+(local Y / 0.06)^2 + (local Z / 0.04)^2 <= 1
+```
+
+The ellipse is not clipped to the barrel radius. Since `SWEET_SPOT_ORIGIN` is already 0.01 m above the bat centreline, the top of the zone still overflows the 0.0465 m barrel radius by 3.5 mm.
 
 ## Output Files
 
@@ -425,13 +536,15 @@ Column groups:
 
 ```text
 metadata
+HITTER_HANDEDNESS
 local miss direction flags
-tags/outcome fields
+OUTCOME
+sweet spot zone flag
 events
 START_DATA foot/ankle positions
-BALL_MIN + BALL_MIN_DIST_MISS
-T_MIN_LOCAL_K80 + T_MIN_GLOBAL_K80
-local/global ball, bat, and sweet-spot positions at T-min
+KT_BALL_MIN_FRAME + KT_BALL_MIN_DIST_MISS
+T_MIN_LOCAL + T_MIN_GLOBAL
+global ball, global bat endpoint, and sweet-spot-origin positions at T-min
 local/global miss vectors
 local/global missed distances
 max miss velocity components from downswing/start frame to each space's T-min frame
@@ -439,24 +552,44 @@ max miss speeds
 velocity and speed at T-min
 ```
 
+`START_DATA` foot/ankle positions use compact side/body names:
+
+```text
+L_FOOT_START_X/Y/Z
+R_FOOT_START_X/Y/Z
+L_ANKLE_START_X/Y/Z
+R_ANKLE_START_X/Y/Z
+```
+
+Kinatrax ball-min report fields are emitted with a `KT_` prefix:
+
+```text
+KT_BALL_MIN_FRAME
+KT_BALL_MIN_DIST_MISS
+```
+
 Key generated columns include:
 
 ```text
-T_MIN_LOCAL_K80
-T_MIN_GLOBAL_K80
-BALL_IN_BAT_AT_TMIN_K80_X/Y/Z
-BALL_AT_TMIN_K80_X/Y/Z
-BAT_KNOB_AT_TMIN_K80_X/Y/Z
-BAT_TOP_AT_TMIN_K80_X/Y/Z
-SS_K80_AT_TMIN_X/Y/Z
-MISS_VECTOR_LOCAL_K80_X/Y/Z
-MISS_VECTOR_GLOBAL_K80_X/Y/Z
-MISSED_DISTANCE_LOCAL_K80
-MISSED_DISTANCE_GLOBAL_K80
-MAX_MISS_VELOCITY_K80_LOCAL_X/Y/Z
-MAX_MISS_VELOCITY_K80_GLOBAL_X/Y/Z
-MAX_MISS_SPEED_K80_LOCAL
-MAX_MISS_SPEED_K80_GLOBAL
+T_MIN_LOCAL
+T_MIN_GLOBAL
+IN_SWEET_SPOT_ZONE
+BALL_AT_TMIN_X/Y/Z
+BAT_KNOB_AT_TMIN_X/Y/Z
+BAT_TOP_AT_TMIN_X/Y/Z
+SWEET_SPOT_ORIGIN_AT_TMIN_X/Y/Z
+MISS_VECTOR_LOCAL_X/Y/Z
+MISS_VECTOR_GLOBAL_X/Y/Z
+MISSED_DISTANCE_LOCAL
+MISSED_DISTANCE_GLOBAL
+MAX_MISS_VELOCITY_LOCAL_X/Y/Z
+MAX_MISS_VELOCITY_GLOBAL_X/Y/Z
+MAX_MISS_SPEED_LOCAL
+MAX_MISS_SPEED_GLOBAL
+MISS_VELOCITY_LOCAL_X/Y/Z
+MISS_VELOCITY_GLOBAL_X/Y/Z
+MISS_SPEED_LOCAL_AT_TMIN
+MISS_SPEED_GLOBAL_AT_TMIN
 ```
 
 ### `results/time_series/<RUN_LABEL>_time_series.csv`
@@ -473,15 +606,15 @@ BALL_X/Y/Z
 BALL_IN_BAT_X/Y/Z
 BAT_KNOB_X/Y/Z
 BAT_TOP_X/Y/Z
-SS_K80_X/Y/Z
-MISS_VECTOR_LOCAL_K80_X/Y/Z
-MISS_VECTOR_GLOBAL_K80_X/Y/Z
-MISSED_DISTANCE_LOCAL_K80
-MISSED_DISTANCE_GLOBAL_K80
-MISS_VECTOR_VELOCITY_LOCAL_K80_X/Y/Z
-MISS_VECTOR_VELOCITY_GLOBAL_K80_X/Y/Z
-MISSED_DISTANCE_LOCAL_K80_SPEED
-MISSED_DISTANCE_GLOBAL_K80_SPEED
+K80_X/Y/Z
+SWEET_SPOT_ORIGIN_X/Y/Z
+MISS_VECTOR_GLOBAL_X/Y/Z
+MISSED_DISTANCE_LOCAL
+MISSED_DISTANCE_GLOBAL
+MISS_VELOCITY_LOCAL_X/Y/Z
+MISS_VELOCITY_GLOBAL_X/Y/Z
+MISS_SPEED_LOCAL
+MISS_SPEED_GLOBAL
 foot/ankle positions
 ```
 
@@ -496,11 +629,12 @@ OUTCOME,COUNT
 Typical outcomes:
 
 ```text
-hit
-miss
+BALL_CONTACT
+MISS
+BAD
 CHECK_SWING
-no_report
 TAKE_skipped
+NO_REPORT_skipped
 empty_frames_skipped
 ```
 
@@ -515,7 +649,7 @@ Validation plots are off by default in batch-style runs when you pass:
 If enabled, plots are written under:
 
 ```text
-fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/K80/
+fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/SWEET_SPOT_ORIGIN/
 ```
 
 Use:
@@ -542,7 +676,7 @@ Open:
 http://127.0.0.1:5001
 ```
 
-The viewer loads a CSV into memory at startup, lets you select a `MLBAM_GUID`, and displays the skeleton, bat, ball, K80 point, and `R80` axes.
+The viewer loads a CSV into memory at startup, lets you select a `MLBAM_GUID`, and displays the skeleton, bat, ball, K80 reference point, and `R80` axes.
 
 More detail is in [viewer/HITTING_VIEWER_README.md](viewer/HITTING_VIEWER_README.md).
 
@@ -562,7 +696,7 @@ Important coverage:
 - all-zero ball centers becoming nulls
 - fixed 30 Hz Butterworth behavior
 - BAT_80 LCS unit/orthogonality behavior
-- K80-only output schema snapshots
+- sweet-spot-origin output schema snapshots, with K80 retained only as a time-series reference
 - no retired `K82`, `K67`, residual, or generated unit-suffix columns
 - canonical output paths
 
@@ -608,7 +742,7 @@ results/<label>_outcome_counts.csv
 
 ## Design Notes
 
-- This is a clean-break K80 pipeline.
+- This is a clean-break sweet-spot-origin pipeline.
 - The canonical public output identity is `MLBAM_GAME_ID` + `MLBAM_GUID`.
 - Snowflake pulls are cached on disk because SSO is slow and full-game motion files are large.
 - Bulk mode processes games one at a time to avoid loading multiple full games into memory.

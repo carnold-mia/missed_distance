@@ -42,9 +42,10 @@ BAT_KNOB_X     = -0.8536
 BAT_BARREL_R   =  0.0465
 BAT_HANDLE_R   =  0.012
 BAT_KNOB_R     =  0.025
+BAT_CENTER_Z   = -0.01
 
 SS_ORIGIN_Y    =  0.0
-SS_ORIGIN_Z    =  0.01
+SS_ORIGIN_Z    =  0.0
 SS_SEMI_MAJOR  =  0.06
 SS_SEMI_MINOR  =  0.04
 
@@ -97,31 +98,48 @@ def build_bat_surface_mesh():
     R_mesh        = np.meshgrid(theta, r_vals,  indexing='ij')[1]
 
     X_mesh = R_mesh * np.cos(Theta)
-    Z_mesh = R_mesh * np.sin(Theta)
+    Z_mesh = BAT_CENTER_Z + R_mesh * np.sin(Theta)
     return Y_mesh, X_mesh, Z_mesh
 
 
 def project_sweet_spot(n_t: int = 400):
     """
-    Project sweet spot ellipse boundary onto the barrel surface.
+    Project sweet spot ellipse boundary onto the barrel surface using
+    angular wrapping so the curve forms a complete closed oval.
+
+    SS_ORIGIN_Z is in the SWEET_SPOT_ORIGIN local frame, so it is converted
+    to a bat-centreline relative angle before mapping back to local Z.
+
+        θ_centre = arcsin((SS_ORIGIN_Z - BAT_CENTER_Z) / R)
+        θ_half   = arcsin(SS_SEMI_MINOR / R)
+        θ(t)     = θ_centre + θ_half * sin(t)
+        X = R*cos(θ),  Z = BAT_CENTER_Z + R*sin(θ)
+
     Returns (ss_y, ss_x, ss_z) 1-D arrays.
     """
-    t      = np.linspace(0, 2 * np.pi, n_t)
-    ss_y   = SS_ORIGIN_Y + SS_SEMI_MAJOR * np.cos(t)
-    ss_z_r = SS_ORIGIN_Z + SS_SEMI_MINOR * np.sin(t)
-    ss_x   = np.empty(n_t)
-    ss_z   = np.empty(n_t)
-    for i, (yv, zr) in enumerate(zip(ss_y, ss_z_r)):
-        R       = bat_radius_at_y(yv)
-        zc      = float(np.clip(zr, -R, R))
-        ss_z[i] = zc
-        ss_x[i] = np.sqrt(max(0.0, R ** 2 - zc ** 2))
+    t    = np.linspace(0, 2 * np.pi, n_t)
+    ss_y = SS_ORIGIN_Y + SS_SEMI_MAJOR * np.cos(t)
+    ss_x = np.empty(n_t)
+    ss_z = np.empty(n_t)
+    for i, (yv, tv) in enumerate(zip(ss_y, t)):
+        R          = bat_radius_at_y(yv)
+        theta_cen  = np.arcsin(np.clip((SS_ORIGIN_Z - BAT_CENTER_Z) / R, -1.0, 1.0))
+        theta_half = np.arcsin(np.clip(SS_SEMI_MINOR / R, -1.0, 1.0))
+        theta      = theta_cen + theta_half * np.sin(tv)
+        ss_x[i]    = R * np.cos(theta)
+        ss_z[i]    = BAT_CENTER_Z + R * np.sin(theta)
     return ss_y, ss_x, ss_z
 
 
 def build_sweet_spot_patch(n_y: int = 60, n_z: int = 30):
     """
-    Build filled surface patch for sweet spot on barrel.
+    Build filled surface patch for sweet spot on barrel using angular
+    wrapping so the patch curves over the top of the bat rather than
+    being clipped at the barrel edge.
+
+    For each Y slice the angular half-width is scaled by the ellipse
+    factor sqrt(1 − dy²) to match the elliptical footprint in plan view.
+
     Returns (Y, X, Z) 2-D arrays for go.Surface.
     """
     y_vals  = np.linspace(SS_ORIGIN_Y - SS_SEMI_MAJOR,
@@ -130,14 +148,16 @@ def build_sweet_spot_patch(n_y: int = 60, n_z: int = 30):
     X_p = np.empty((n_y, n_z))
     Z_p = np.empty((n_y, n_z))
     for i, yv in enumerate(y_vals):
-        dy     = (yv - SS_ORIGIN_Y) / SS_SEMI_MAJOR
-        z_half = SS_SEMI_MINOR * np.sqrt(max(0.0, 1.0 - dy ** 2))
-        zv     = np.linspace(SS_ORIGIN_Z - z_half, SS_ORIGIN_Z + z_half, n_z)
-        R      = bat_radius_at_y(yv)
-        zc     = np.clip(zv, -R, R)
+        R          = bat_radius_at_y(yv)
+        dy         = (yv - SS_ORIGIN_Y) / SS_SEMI_MAJOR
+        theta_cen  = np.arcsin(np.clip((SS_ORIGIN_Z - BAT_CENTER_Z) / R, -1.0, 1.0))
+        theta_half = np.arcsin(np.clip(SS_SEMI_MINOR / R, -1.0, 1.0))
+        theta_half_local = theta_half * np.sqrt(max(0.0, 1.0 - dy ** 2))
+        thetas = np.linspace(theta_cen - theta_half_local,
+                             theta_cen + theta_half_local, n_z)
         Y_p[i] = yv
-        X_p[i] = np.sqrt(np.maximum(0.0, R ** 2 - zc ** 2))
-        Z_p[i] = zc
+        X_p[i] = R * np.cos(thetas)
+        Z_p[i] = BAT_CENTER_Z + R * np.sin(thetas)
     return Y_p, X_p, Z_p
 
 
@@ -167,8 +187,19 @@ df_merged = pd.merge(
     left_on='MLBAM_GUID', right_on='mlbam_guid', how='left',
 ).drop(columns=['mlbam_guid'])
 
+def outcome_mask(df: pd.DataFrame, label: str) -> pd.Series:
+    """Return rows matching the canonical OUTCOME label, with legacy fallback."""
+    if 'OUTCOME' in df.columns:
+        outcome = df['OUTCOME'].astype(str).str.strip().str.upper()
+        aliases = {'BALL_CONTACT': {'BALL_CONTACT', 'HIT'}}
+        return outcome.isin(aliases.get(label, {label}))
+    if label in df.columns:
+        return df[label] == label
+    return pd.Series(False, index=df.index)
+
+
 # All ball-contact rows (xwOBA may be NaN for non-barrel contacts)
-df_contact = df_merged[df_merged['BALL_CONTACT'] == 'BALL_CONTACT'].copy()
+df_contact = df_merged[outcome_mask(df_merged, 'BALL_CONTACT')].copy()
 
 # Filtered version — only contacts with an xwOBA value above the floor
 df_filtered = df_contact.dropna(subset=['xwobacon_ev_la'])
@@ -206,7 +237,7 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
 
     Parameters
     ----------
-    df_plot : rows to scatter (must have BALL_IN_BAT_AT_TMIN_K80_Y/X/Z
+    df_plot : rows to scatter (must have MISS_VECTOR_LOCAL_Y/X/Z
               and xwobacon_ev_la columns; NaN xwOBA shown as grey).
     title   : main title string displayed above the plot.
     """
@@ -251,9 +282,9 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
     # Unscored contacts (grey) — only present in the unfiltered version
     if not df_unscored.empty:
         fig.add_trace(go.Scatter3d(
-            x=df_unscored['BALL_IN_BAT_AT_TMIN_K80_Y'].values,
-            y=df_unscored['BALL_IN_BAT_AT_TMIN_K80_X'].values,
-            z=df_unscored['BALL_IN_BAT_AT_TMIN_K80_Z'].values,
+            x=df_unscored['MISS_VECTOR_LOCAL_Y'].values,
+            y=df_unscored['MISS_VECTOR_LOCAL_X'].values,
+            z=df_unscored['MISS_VECTOR_LOCAL_Z'].values,
             mode='markers',
             marker=dict(size=5, color='#999999', opacity=0.5,
                         line=dict(color='#666666', width=0.3)),
@@ -262,9 +293,9 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
                 f"Y: {y:.4f} m  X: {x:.4f} m  Z: {z:.4f} m<br>Game: {gid}"
                 for g, y, x, z, gid in zip(
                     df_unscored['MLBAM_GUID'],
-                    df_unscored['BALL_IN_BAT_AT_TMIN_K80_Y'],
-                    df_unscored['BALL_IN_BAT_AT_TMIN_K80_X'],
-                    df_unscored['BALL_IN_BAT_AT_TMIN_K80_Z'],
+                    df_unscored['MISS_VECTOR_LOCAL_Y'],
+                    df_unscored['MISS_VECTOR_LOCAL_X'],
+                    df_unscored['MISS_VECTOR_LOCAL_Z'],
                     df_unscored['source_game_id'],
                 )
             ],
@@ -275,9 +306,9 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
     # Scored contacts (RdYlGn colour scale)
     if not df_scored.empty:
         fig.add_trace(go.Scatter3d(
-            x=df_scored['BALL_IN_BAT_AT_TMIN_K80_Y'].values,
-            y=df_scored['BALL_IN_BAT_AT_TMIN_K80_X'].values,
-            z=df_scored['BALL_IN_BAT_AT_TMIN_K80_Z'].values,
+            x=df_scored['MISS_VECTOR_LOCAL_Y'].values,
+            y=df_scored['MISS_VECTOR_LOCAL_X'].values,
+            z=df_scored['MISS_VECTOR_LOCAL_Z'].values,
             mode='markers',
             marker=dict(
                 size=6,
@@ -301,9 +332,9 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
                 for g, w, y, x, z, gid in zip(
                     df_scored['MLBAM_GUID'],
                     df_scored['xwobacon_ev_la'],
-                    df_scored['BALL_IN_BAT_AT_TMIN_K80_Y'],
-                    df_scored['BALL_IN_BAT_AT_TMIN_K80_X'],
-                    df_scored['BALL_IN_BAT_AT_TMIN_K80_Z'],
+                    df_scored['MISS_VECTOR_LOCAL_Y'],
+                    df_scored['MISS_VECTOR_LOCAL_X'],
+                    df_scored['MISS_VECTOR_LOCAL_Z'],
                     df_scored['source_game_id'],
                 )
             ],
@@ -315,9 +346,9 @@ def build_figure(df_plot: pd.DataFrame, title: str) -> go.Figure:
     fig.add_trace(go.Scatter3d(
         x=[SS_ORIGIN_Y, SS_ORIGIN_Y],
         y=[-BAT_BARREL_R, BAT_BARREL_R],
-        z=[0, 0],
+        z=[SS_ORIGIN_Z, SS_ORIGIN_Z],
         mode='lines', line=dict(color='red', width=2, dash='dot'),
-        name='Sweet Spot Y', hoverinfo='skip',
+        name='Sweet Spot Origin Y', hoverinfo='skip',
     ))
 
     # --- Layout ----------------------------------------------------

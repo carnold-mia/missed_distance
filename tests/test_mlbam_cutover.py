@@ -22,6 +22,8 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 GENERATED_PREFIXES = (
     "MISSED_DISTANCE_",
     "MISS_VECTOR_",
+    "MISS_VELOCITY_",
+    "MISS_SPEED_",
     "MAX_MISS_",
     "T_MIN_",
     "BALL_AT_TMIN_",
@@ -29,6 +31,7 @@ GENERATED_PREFIXES = (
     "BAT_KNOB_AT_TMIN_",
     "BAT_TOP_AT_TMIN_",
     "BAT_TOP_IN_BAT_AT_TMIN_",
+    "SWEET_SPOT_",
     "SS_",
 )
 UNIT_SUFFIXES = ("_MPH", "_KPH", "_M", "_HZ", "_KG", "_LB", "_MPS")
@@ -68,9 +71,11 @@ def _minimal_hitting_rows(n_frames: int = 4) -> pd.DataFrame:
                 "RIGHTANKLE_TX": -0.15,
                 "RIGHTANKLE_TY": 0.07 + frame * 0.001,
                 "RIGHTANKLE_TZ": 0.08,
-                "BAD": "MISS",
-                "R": "",
+                "BAD": np.nan,
+                "R": "R",
+                "L": np.nan,
                 "SWING": "SWING",
+                "MISS": "MISS",
                 "TAKE": np.nan,
                 "BALL_START": 0,
                 "DOWNSWING": 3,
@@ -79,6 +84,7 @@ def _minimal_hitting_rows(n_frames: int = 4) -> pd.DataFrame:
                 "BAT_STOP": n_frames - 2,
                 "START_DATA": 2,
                 "MAX_BAT_SPEED_MPH": 73.5,
+                "HANDEDNESS": 1,
                 **{
                     f"SPINE_R{row}{col}": 1.0 if row == col else 0.0
                     for row in (1, 2, 3)
@@ -111,20 +117,31 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, args: list[object]) -> None:
 
 def _assert_retired_columns_absent(df: pd.DataFrame) -> None:
     retired_tokens = (
-    "CENTER",
-    "K67",
-    "K82",
-    "CUT_",
-    "RESIDUAL",
+        "CENTER",
+        "K67",
+        "K82",
+        "CUT_",
+        "RESIDUAL",
         "KT_MISS",
         "SS_LOCAL",
         "VELOCITY_FILTER",
         "PEAK_SPEED",
     )
+    retired_exact = {
+        "BAD",
+        "R",
+        "L",
+        "HANDEDNESS",
+        "TAKE",
+        "SWING",
+        "MISS",
+        "BALL_CONTACT",
+        "CHECK_SWING",
+    }
     stale_columns = [
         column
         for column in df.columns
-        if any(token in column.upper() for token in retired_tokens)
+        if column in retired_exact or any(token in column.upper() for token in retired_tokens)
     ]
     assert stale_columns == []
 
@@ -404,6 +421,163 @@ def test_local_tmin_selection_uses_3d_distance_not_planar_only() -> None:
     assert idx == 1
 
 
+def test_sweet_spot_zone_uses_local_yz_ellipse_with_overflow() -> None:
+    from biomech_functions import functions as funcs
+
+    assert funcs._sweet_spot_zone_check(local_y=0.0, local_z=0.0)
+    assert funcs._sweet_spot_zone_check(local_y=0.06, local_z=0.0)
+    assert funcs._sweet_spot_zone_check(local_y=0.0, local_z=0.04)
+    assert not funcs._sweet_spot_zone_check(local_y=0.0, local_z=0.0401)
+    assert not funcs._sweet_spot_zone_check(local_y=0.061, local_z=0.0)
+
+
+def test_sweet_spot_origin_copies_k80_orientation_with_local_z_offset() -> None:
+    from biomech_functions import functions as funcs
+
+    normalized = normalize_mlbam_hitting_data(_minimal_hitting_rows(n_frames=18))
+    knob_global = funcs._to_vec3(normalized, "KNOB_TX", "KNOB_TY", "KNOB_TZ")
+    top_global = funcs._to_vec3(normalized, "TOP_TX", "TOP_TY", "TOP_TZ")
+    frame_vec = funcs._frame_vector(normalized, len(normalized))
+    bat_80_global, r_bat80 = funcs._bat_80_lcs(
+        knob_global,
+        top_global,
+        handedness=funcs._infer_handedness_from_report(normalized),
+        axis_backfill_indices=funcs._axis_backfill_indices(normalized, frame_vec),
+    )
+
+    sweet_spot_origin = funcs._sweet_spot_origin_global(bat_80_global, r_bat80)
+    offset_local = np.stack(
+        [
+            r_bat80[frame_idx].T
+            @ (sweet_spot_origin[:, frame_idx] - bat_80_global[:, frame_idx])
+            for frame_idx in range(r_bat80.shape[0])
+        ]
+    )
+
+    np.testing.assert_allclose(
+        offset_local,
+        np.tile(funcs.SWEET_SPOT_ORIGIN_LOCAL_OFFSET, (r_bat80.shape[0], 1)),
+        atol=1e-12,
+    )
+
+
+def test_vertical_direction_flags_are_swing_relative_to_ball() -> None:
+    from biomech_functions import functions as funcs
+
+    positive_z_row: dict[str, object] = {}
+    positive_z_miss = np.array([[0.0], [0.0], [0.25]])
+    funcs._add_local_miss_direction_flags(positive_z_row, positive_z_miss, 0)
+
+    assert positive_z_row["SWUNG_OVER"] == 1
+    assert positive_z_row["SWUNG_UNDER"] == 0
+    assert "OVER" not in positive_z_row
+    assert "UNDER" not in positive_z_row
+
+    negative_z_row: dict[str, object] = {}
+    negative_z_miss = np.array([[0.0], [0.0], [-0.25]])
+    funcs._add_local_miss_direction_flags(negative_z_row, negative_z_miss, 0)
+
+    assert negative_z_row["SWUNG_OVER"] == 0
+    assert negative_z_row["SWUNG_UNDER"] == 1
+
+
+def test_discrete_schema_replaces_in_band_with_sweet_spot_zone() -> None:
+    discrete_df, _ = _compute_fixture_outputs()
+
+    assert "IN_SWEET_SPOT_ZONE" in discrete_df.columns
+    assert "IN_BAND" not in discrete_df.columns
+
+
+def test_report_r_l_flags_collapse_to_hitter_handedness() -> None:
+    from biomech_functions import functions as funcs
+
+    assert funcs._infer_hitter_handedness_from_report_flags(
+        pd.DataFrame({"R": ["R"], "L": [0]})
+    ) == "R"
+    assert funcs._infer_hitter_handedness_from_report_flags(
+        pd.DataFrame({"R": [0], "L": ["L"]})
+    ) == "L"
+    assert funcs._infer_hitter_handedness_from_report_flags(
+        pd.DataFrame({"R": ["R"], "L": ["L"]})
+    ) == "AMBIGUOUS"
+    assert pd.isna(
+        funcs._infer_hitter_handedness_from_report_flags(
+            pd.DataFrame({"R": [0], "L": [""]})
+        )
+    )
+
+    discrete_df, time_series = _compute_fixture_outputs()
+
+    assert discrete_df.loc[0, "HITTER_HANDEDNESS"] == "R"
+    assert "HITTER_HANDEDNESS" not in time_series.columns
+    for raw_col in ("R", "L", "BAD", "HANDEDNESS"):
+        assert raw_col not in discrete_df.columns
+        assert raw_col not in time_series.columns
+
+
+def test_bad_report_flag_flows_to_outcome_without_raw_bad_column() -> None:
+    from biomech_functions import functions as funcs
+
+    rows = _minimal_hitting_rows(n_frames=18)
+    rows["BAD"] = "BAD"
+    rows["SWING"] = np.nan
+    rows["MISS"] = np.nan
+    rows["BALL_CONTACT"] = np.nan
+    rows["CHECK_SWING"] = np.nan
+
+    normalized = normalize_mlbam_hitting_data(rows)
+    discrete_df, time_series, outcome_counts = funcs.compute_discrete_and_time_series(
+        normalized,
+        group_id_cols=("MLBAM_GAME_ID", "MLBAM_GUID"),
+        output_id_cols=("MLBAM_GAME_ID", "MLBAM_GUID", "MLBAM_PLAYER_ID", "SESSION_DATE"),
+        save_validation_plots=False,
+    )
+
+    assert discrete_df.loc[0, "OUTCOME"] == "BAD"
+    assert outcome_counts["BAD"] == 1
+    assert "BAD" not in discrete_df.columns
+    assert "BAD" not in time_series.columns
+
+
+def test_no_report_trials_are_skipped_without_blank_outcome_rows() -> None:
+    from biomech_functions import functions as funcs
+
+    rows = _minimal_hitting_rows(n_frames=18)
+    for col in ("BAD", "SWING", "MISS", "BALL_CONTACT", "CHECK_SWING", "TAKE"):
+        rows[col] = np.nan
+
+    normalized = normalize_mlbam_hitting_data(rows)
+    discrete_df, time_series, outcome_counts = funcs.compute_discrete_and_time_series(
+        normalized,
+        group_id_cols=("MLBAM_GAME_ID", "MLBAM_GUID"),
+        output_id_cols=("MLBAM_GAME_ID", "MLBAM_GUID", "MLBAM_PLAYER_ID", "SESSION_DATE"),
+        save_validation_plots=False,
+    )
+
+    assert discrete_df.empty
+    assert time_series.empty
+    assert outcome_counts["NO_REPORT_skipped"] == 1
+    assert "no_report" not in outcome_counts
+
+
+def test_sweet_spot_zone_uses_local_tmin_for_miss_outcomes() -> None:
+    from biomech_functions import functions as funcs
+
+    discrete_df, time_series = _compute_fixture_outputs()
+
+    local_tmin_frame = discrete_df.loc[0, "T_MIN_LOCAL"]
+    tmin_row = time_series.loc[time_series["FRAME"] == local_tmin_frame].iloc[0]
+    expected = int(
+        funcs._sweet_spot_zone_check(
+            local_y=float(tmin_row["BALL_IN_BAT_Y"]),
+            local_z=float(tmin_row["BALL_IN_BAT_Z"]),
+        )
+    )
+
+    assert discrete_df.loc[0, "OUTCOME"] == "MISS"
+    assert discrete_df.loc[0, "IN_SWEET_SPOT_ZONE"] == expected
+
+
 def test_discrete_schema_matches_snapshot() -> None:
     discrete_df, _ = _compute_fixture_outputs()
 
@@ -451,32 +625,35 @@ def test_compute_mlbam_mode_outputs_k80_bat_80_local_global_schema() -> None:
         "MLBAM_GUID",
         "MLBAM_PLAYER_ID",
         "SESSION_DATE",
+        "HITTER_HANDEDNESS",
         "MAX_BAT_SPEED_MPH",
-        "T_MIN_GLOBAL_K80",
-        "T_MIN_LOCAL_K80",
-        "MISSED_DISTANCE_GLOBAL_K80",
-        "MISSED_DISTANCE_LOCAL_K80",
-        "LEFTFOOT_AT_START_DATA_X",
-        "RIGHTANKLE_AT_START_DATA_Z",
-        "BALL_IN_BAT_AT_TMIN_K80_X",
-        "BAT_TOP_IN_BAT_AT_TMIN_K80_Z",
-        "BALL_AT_TMIN_K80_X",
-        "BAT_KNOB_AT_TMIN_K80_X",
-        "BAT_TOP_AT_TMIN_K80_Z",
-        "MISS_VECTOR_GLOBAL_K80_X",
-        "MISS_VECTOR_GLOBAL_K80_Y",
-        "MISS_VECTOR_GLOBAL_K80_Z",
-        "MISS_VECTOR_LOCAL_K80_X",
-        "MISS_VECTOR_LOCAL_K80_Y",
-        "MISS_VECTOR_LOCAL_K80_Z",
-        "MISS_VECTOR_VELOCITY_GLOBAL_K80_X",
-        "MISS_VECTOR_VELOCITY_LOCAL_K80_Z",
-        "MAX_MISS_VELOCITY_K80_LOCAL_X",
-        "MAX_MISS_VELOCITY_K80_GLOBAL_Z",
-        "MAX_MISS_SPEED_K80_LOCAL",
-        "MAX_MISS_SPEED_K80_GLOBAL",
-        "MISSED_DISTANCE_GLOBAL_K80_SPEED_AT_TMIN",
-        "MISSED_DISTANCE_LOCAL_K80_SPEED_AT_TMIN",
+        "T_MIN_GLOBAL",
+        "T_MIN_LOCAL",
+        "MISSED_DISTANCE_GLOBAL",
+        "MISSED_DISTANCE_LOCAL",
+        "KT_BALL_MIN_FRAME",
+        "L_FOOT_START_X",
+        "R_ANKLE_START_Z",
+        "BALL_AT_TMIN_X",
+        "BAT_KNOB_AT_TMIN_X",
+        "BAT_TOP_AT_TMIN_Z",
+        "SWEET_SPOT_ORIGIN_AT_TMIN_X",
+        "SWEET_SPOT_ORIGIN_AT_TMIN_Y",
+        "SWEET_SPOT_ORIGIN_AT_TMIN_Z",
+        "MISS_VECTOR_GLOBAL_X",
+        "MISS_VECTOR_GLOBAL_Y",
+        "MISS_VECTOR_GLOBAL_Z",
+        "MISS_VECTOR_LOCAL_X",
+        "MISS_VECTOR_LOCAL_Y",
+        "MISS_VECTOR_LOCAL_Z",
+        "MISS_VELOCITY_GLOBAL_X",
+        "MISS_VELOCITY_LOCAL_Z",
+        "MAX_MISS_VELOCITY_LOCAL_X",
+        "MAX_MISS_VELOCITY_GLOBAL_Z",
+        "MAX_MISS_SPEED_LOCAL",
+        "MAX_MISS_SPEED_GLOBAL",
+        "MISS_SPEED_GLOBAL_AT_TMIN",
+        "MISS_SPEED_LOCAL_AT_TMIN",
     }
     expected_time_series_columns = {
         "MLBAM_GAME_ID",
@@ -494,46 +671,74 @@ def test_compute_mlbam_mode_outputs_k80_bat_80_local_global_schema() -> None:
         "BAT_TOP_X",
         "BAT_TOP_Y",
         "BAT_TOP_Z",
-        "SS_K80_X",
-        "SS_K80_Z",
-        "MISS_VECTOR_GLOBAL_K80_X",
-        "MISS_VECTOR_GLOBAL_K80_Z",
-        "MISS_VECTOR_LOCAL_K80_X",
-        "MISS_VECTOR_LOCAL_K80_Z",
-        "MISSED_DISTANCE_GLOBAL_K80",
-        "MISSED_DISTANCE_LOCAL_K80",
-        "MISS_VECTOR_VELOCITY_GLOBAL_K80_X",
-        "MISS_VECTOR_VELOCITY_LOCAL_K80_Z",
-        "MISSED_DISTANCE_GLOBAL_K80_SPEED",
-        "MISSED_DISTANCE_LOCAL_K80_SPEED",
+        "K80_X",
+        "K80_Y",
+        "K80_Z",
+        "SWEET_SPOT_ORIGIN_X",
+        "SWEET_SPOT_ORIGIN_Y",
+        "SWEET_SPOT_ORIGIN_Z",
+        "MISS_VECTOR_GLOBAL_X",
+        "MISS_VECTOR_GLOBAL_Z",
+        "MISSED_DISTANCE_GLOBAL",
+        "MISSED_DISTANCE_LOCAL",
+        "MISS_VELOCITY_GLOBAL_X",
+        "MISS_VELOCITY_LOCAL_Z",
+        "MISS_SPEED_GLOBAL",
+        "MISS_SPEED_LOCAL",
     }
 
     assert len(metrics_df) == 1
     assert expected_metric_columns.issubset(metrics_df.columns)
     assert expected_time_series_columns.issubset(time_series.columns)
+    assert metrics_df.loc[0, "HITTER_HANDEDNESS"] == "R"
     assert metrics_df.loc[0, "MAX_BAT_SPEED_MPH"] == pytest.approx(73.5)
     assert "MAX_BAT_SPEED" not in metrics_df.columns
-    for output in (metrics_df, time_series):
-        assert not any("K82" in column for column in output.columns)
+    assert not any("K82" in column for column in metrics_df.columns)
+    assert not any("K80" in column for column in metrics_df.columns)
+    assert not any("K82" in column for column in time_series.columns)
+    assert {"K80_X", "K80_Y", "K80_Z"}.issubset(time_series.columns)
+    for axis in ("X", "Y", "Z"):
+        assert f"SWEET_SPOT_{axis}" not in time_series.columns
+        assert f"SWEET_SPOT_AT_TMIN_{axis}" not in metrics_df.columns
     assert time_series[["MLBAM_GAME_ID", "MLBAM_GUID", "FRAME"]].duplicated().sum() == 0
     assert "BACK_FOOT_CG_POS_X" not in metrics_df.columns
-    assert metrics_df.loc[0, "LEFTFOOT_AT_START_DATA_Y"] == pytest.approx(0.011)
-    assert metrics_df.columns.get_loc("LEFTFOOT_AT_START_DATA_X") < metrics_df.columns.get_loc(
-        "T_MIN_LOCAL_K80"
+    assert "BALL_MIN" not in metrics_df.columns
+    assert "KT_BALL_MIN_FRAME" in metrics_df.columns
+    old_speed_velocity_names = {
+        "MISS_VECTOR_VELOCITY_LOCAL_X",
+        "MISS_VECTOR_VELOCITY_LOCAL_Y",
+        "MISS_VECTOR_VELOCITY_LOCAL_Z",
+        "MISS_VECTOR_VELOCITY_GLOBAL_X",
+        "MISS_VECTOR_VELOCITY_GLOBAL_Y",
+        "MISS_VECTOR_VELOCITY_GLOBAL_Z",
+        "MISSED_DISTANCE_LOCAL_SPEED",
+        "MISSED_DISTANCE_GLOBAL_SPEED",
+        "MISSED_DISTANCE_LOCAL_SPEED_AT_TMIN",
+        "MISSED_DISTANCE_GLOBAL_SPEED_AT_TMIN",
+    }
+    assert old_speed_velocity_names.isdisjoint(metrics_df.columns)
+    assert old_speed_velocity_names.isdisjoint(time_series.columns)
+    assert not any(column.startswith("BALL_IN_BAT_AT_TMIN_") for column in metrics_df.columns)
+    assert not any(column.startswith("BAT_TOP_IN_BAT_AT_TMIN_") for column in metrics_df.columns)
+    assert not any(column.startswith("BAT_KNOB_IN_BAT_AT_TMIN_") for column in metrics_df.columns)
+    assert not any(column.startswith("MISS_VECTOR_LOCAL_") for column in time_series.columns)
+    assert not any(column.startswith("BAT_TOP_IN_BAT_") for column in time_series.columns)
+    assert not any(column.startswith("BAT_KNOB_IN_BAT_") for column in time_series.columns)
+    assert metrics_df.loc[0, "L_FOOT_START_Y"] == pytest.approx(0.011)
+    assert metrics_df.columns.get_loc("L_FOOT_START_X") < metrics_df.columns.get_loc(
+        "T_MIN_LOCAL"
     )
-    assert metrics_df.columns.get_loc("T_MIN_GLOBAL_K80") < metrics_df.columns.get_loc(
-        "BALL_IN_BAT_AT_TMIN_K80_X"
+    assert metrics_df.columns.get_loc("T_MIN_GLOBAL") < metrics_df.columns.get_loc(
+        "BALL_AT_TMIN_X"
     )
-    assert "BAT_KNOB_IN_BAT_AT_TMIN_K80_X" not in metrics_df.columns
-    assert "BAT_KNOB_IN_BAT_AT_TMIN_LOCAL_K80_X" not in metrics_df.columns
-    assert metrics_df.columns.get_loc("BAT_TOP_IN_BAT_AT_TMIN_K80_Z") < metrics_df.columns.get_loc(
-        "MISS_VECTOR_LOCAL_K80_X"
+    assert metrics_df.columns.get_loc("BAT_TOP_AT_TMIN_Z") < metrics_df.columns.get_loc(
+        "MISS_VECTOR_LOCAL_X"
     )
-    assert metrics_df.columns.get_loc("BAT_TOP_AT_TMIN_K80_Z") < metrics_df.columns.get_loc(
-        "MISS_VECTOR_LOCAL_K80_X"
+    assert metrics_df.columns.get_loc("SWEET_SPOT_ORIGIN_AT_TMIN_Z") < metrics_df.columns.get_loc(
+        "MISS_VECTOR_LOCAL_X"
     )
-    assert metrics_df.columns.get_loc("MISS_VECTOR_LOCAL_K80_X") < metrics_df.columns.get_loc(
-        "MISS_VECTOR_GLOBAL_K80_X"
+    assert metrics_df.columns.get_loc("MISS_VECTOR_LOCAL_X") < metrics_df.columns.get_loc(
+        "MISS_VECTOR_GLOBAL_X"
     )
     assert time_series.columns.get_loc("BALL_Z") < time_series.columns.get_loc(
         "BALL_IN_BAT_X"
@@ -542,10 +747,13 @@ def test_compute_mlbam_mode_outputs_k80_bat_80_local_global_schema() -> None:
         "BAT_KNOB_X"
     )
     assert time_series.columns.get_loc("BAT_TOP_Z") < time_series.columns.get_loc(
-        "SS_K80_X"
+        "K80_X"
     )
-    assert time_series.columns.get_loc("SS_K80_Z") < time_series.columns.get_loc(
-        "MISS_VECTOR_LOCAL_K80_X"
+    assert time_series.columns.get_loc("K80_Z") < time_series.columns.get_loc(
+        "SWEET_SPOT_ORIGIN_X"
+    )
+    assert time_series.columns.get_loc("SWEET_SPOT_ORIGIN_Z") < time_series.columns.get_loc(
+        "MISS_VECTOR_GLOBAL_X"
     )
     pulled_unit_columns = {"MAX_BAT_SPEED_MPH"}
     for output in (metrics_df, time_series):
@@ -556,10 +764,10 @@ def test_compute_mlbam_mode_outputs_k80_bat_80_local_global_schema() -> None:
         ]
         assert generated_unit_columns == []
 
-    assert time_series.columns.get_loc("MISS_VECTOR_VELOCITY_LOCAL_K80_Z") < time_series.columns.get_loc(
-        "MISS_VECTOR_VELOCITY_GLOBAL_K80_X"
+    assert time_series.columns.get_loc("MISS_VELOCITY_LOCAL_Z") < time_series.columns.get_loc(
+        "MISS_VELOCITY_GLOBAL_X"
     )
-    assert time_series.columns.get_loc("MISSED_DISTANCE_LOCAL_K80_SPEED") < time_series.columns.get_loc(
+    assert time_series.columns.get_loc("MISS_SPEED_LOCAL") < time_series.columns.get_loc(
         "LEFTFOOT_TX"
     )
 
@@ -567,45 +775,112 @@ def test_compute_mlbam_mode_outputs_k80_bat_80_local_global_schema() -> None:
         column for column in time_series.columns if "VELOCITY" in column or "SPEED" in column
     ]
     assert np.isfinite(time_series[velocity_columns].to_numpy(dtype=float)).all()
+    for space in ("LOCAL", "GLOBAL"):
+        np.testing.assert_allclose(
+            time_series[f"MISS_SPEED_{space}"].to_numpy(float),
+            np.linalg.norm(
+                time_series[
+                    [
+                        f"MISS_VELOCITY_{space}_X",
+                        f"MISS_VELOCITY_{space}_Y",
+                        f"MISS_VELOCITY_{space}_Z",
+                    ]
+                ].to_numpy(float),
+                axis=1,
+            ),
+        )
+
+    ball_global = funcs._to_vec3(normalized, "CENTER_TX", "CENTER_TY", "CENTER_TZ")
+    knob_global = funcs._to_vec3(normalized, "KNOB_TX", "KNOB_TY", "KNOB_TZ")
+    top_global = funcs._to_vec3(normalized, "TOP_TX", "TOP_TY", "TOP_TZ")
+    frame_vec = funcs._frame_vector(normalized, ball_global.shape[1])
+    bat_80_global, r_bat80 = funcs._bat_80_lcs(
+        knob_global,
+        top_global,
+        handedness=funcs._infer_handedness_from_report(normalized),
+        axis_backfill_indices=funcs._axis_backfill_indices(normalized, frame_vec),
+    )
+    sweet_spot_origin = funcs._sweet_spot_origin_global(bat_80_global, r_bat80)
+    expected_ball_in_bat = funcs._global_to_bat_local(
+        ball_global,
+        sweet_spot_origin,
+        r_bat80,
+    )
 
     np.testing.assert_allclose(
-        time_series[["BALL_IN_BAT_X", "BALL_IN_BAT_Y", "BALL_IN_BAT_Z"]].to_numpy(float),
-        time_series[
-            ["MISS_VECTOR_LOCAL_K80_X", "MISS_VECTOR_LOCAL_K80_Y", "MISS_VECTOR_LOCAL_K80_Z"]
-        ].to_numpy(float),
+        time_series[["K80_X", "K80_Y", "K80_Z"]].to_numpy(float).T,
+        bat_80_global,
+        atol=1e-12,
     )
+    np.testing.assert_allclose(
+        time_series[
+            [
+                "SWEET_SPOT_ORIGIN_X",
+                "SWEET_SPOT_ORIGIN_Y",
+                "SWEET_SPOT_ORIGIN_Z",
+            ]
+        ].to_numpy(float).T,
+        sweet_spot_origin,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        time_series[["BALL_IN_BAT_X", "BALL_IN_BAT_Y", "BALL_IN_BAT_Z"]].to_numpy(float).T,
+        expected_ball_in_bat,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        time_series[["MISS_VECTOR_GLOBAL_X", "MISS_VECTOR_GLOBAL_Y", "MISS_VECTOR_GLOBAL_Z"]].to_numpy(float),
+        time_series[["BALL_X", "BALL_Y", "BALL_Z"]].to_numpy(float)
+        - time_series[
+            [
+                "SWEET_SPOT_ORIGIN_X",
+                "SWEET_SPOT_ORIGIN_Y",
+                "SWEET_SPOT_ORIGIN_Z",
+            ]
+        ].to_numpy(float),
+        atol=1e-12,
+    )
+
     local_window = time_series[
         (time_series["FRAME"] >= 3) & (time_series["FRAME"] <= 16)
     ]
     local_selection_distance = np.linalg.norm(
         local_window[
             [
-                "MISS_VECTOR_LOCAL_K80_X",
-                "MISS_VECTOR_LOCAL_K80_Y",
-                "MISS_VECTOR_LOCAL_K80_Z",
+                "BALL_IN_BAT_X",
+                "BALL_IN_BAT_Y",
+                "BALL_IN_BAT_Z",
             ]
         ].to_numpy(float),
         axis=1,
     )
     local_tmin_idx = local_window.index[int(np.nanargmin(local_selection_distance))]
     local_tmin_frame = time_series.loc[local_tmin_idx, "FRAME"]
-    assert metrics_df.loc[0, "T_MIN_LOCAL_K80"] == local_tmin_frame
+    assert metrics_df.loc[0, "T_MIN_LOCAL"] == local_tmin_frame
+    global_tmin_frame = metrics_df.loc[0, "T_MIN_GLOBAL"]
+    global_tmin_row = time_series.loc[time_series["FRAME"] == global_tmin_frame].iloc[0]
+    assert metrics_df.loc[0, "MISS_SPEED_LOCAL_AT_TMIN"] == pytest.approx(
+        time_series.loc[local_tmin_idx, "MISS_SPEED_LOCAL"]
+    )
+    assert metrics_df.loc[0, "MISS_SPEED_GLOBAL_AT_TMIN"] == pytest.approx(
+        global_tmin_row["MISS_SPEED_GLOBAL"]
+    )
 
     local_3d_distance = np.linalg.norm(
         time_series.loc[
             local_tmin_idx,
             [
-                "MISS_VECTOR_LOCAL_K80_X",
-                "MISS_VECTOR_LOCAL_K80_Y",
-                "MISS_VECTOR_LOCAL_K80_Z",
+                "BALL_IN_BAT_X",
+                "BALL_IN_BAT_Y",
+                "BALL_IN_BAT_Z",
             ],
         ].to_numpy(float)
     )
-    assert metrics_df.loc[0, "MISSED_DISTANCE_LOCAL_K80"] == pytest.approx(
+    assert metrics_df.loc[0, "MISSED_DISTANCE_LOCAL"] == pytest.approx(
         local_3d_distance
     )
-    assert metrics_df.loc[0, "MISSED_DISTANCE_LOCAL_K80"] == pytest.approx(
-        metrics_df.loc[0, "MISSED_DISTANCE_GLOBAL_K80"]
+    assert metrics_df.loc[0, "MISSED_DISTANCE_LOCAL"] == pytest.approx(
+        metrics_df.loc[0, "MISSED_DISTANCE_GLOBAL"]
     )
 
 
@@ -614,13 +889,13 @@ def test_outcome_counts_written_as_root_csv(tmp_path: Path) -> None:
 
     path = tmp_path / "831467_outcome_counts.csv"
 
-    _write_outcome_counts_csv({"hit": 2, "miss": 1}, path)
+    _write_outcome_counts_csv({"BALL_CONTACT": 2, "MISS": 1}, path)
 
     output = pd.read_csv(path)
     assert list(output.columns) == ["OUTCOME", "COUNT"]
     assert output.to_dict("records") == [
-        {"OUTCOME": "hit", "COUNT": 2},
-        {"OUTCOME": "miss", "COUNT": 1},
+        {"OUTCOME": "BALL_CONTACT", "COUNT": 2},
+        {"OUTCOME": "MISS", "COUNT": 1},
     ]
 
 
@@ -712,7 +987,7 @@ def test_validation_plots_use_game_guid_root(monkeypatch: pytest.MonkeyPatch) ->
 
     assert calls
     assert {out_dir for out_dir, _ in calls} == {
-        Path("fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/K80"),
+        Path("fig_outputs/MLBAM_GAME_GUID_MD_VALIDATION/SWEET_SPOT_ORIGIN"),
     }
     assert {plot_id for _, plot_id in calls} == {"746020_guid-1"}
 

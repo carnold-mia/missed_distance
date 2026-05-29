@@ -34,7 +34,7 @@ BAT_KNOB_R     =  0.025    # knob cap radius
 # Origin along the bat (Y = 0 is the pipeline's 80 % reference point).
 # Z offset raises the target above the bat's geometric centreline.
 SS_ORIGIN_Y    =  0.0      # m  along bat  (sweet spot Y)
-SS_ORIGIN_Z    =  0.01    # m  across bat (raise above centreline)
+SS_ORIGIN_Z    =  0.0    # m  across bat (raise above centreline)
 
 # --- Target ellipse semi-axes (metres) -----------------------
 # Semi-major: half-length along the bat (Y direction)
@@ -54,14 +54,6 @@ HEATMAP_XWOBA_MIN = 0.6
 # gridsize controls hex density along the longer axis.
 # Increase for finer resolution; decrease if bins are too sparse.
 HEX_GRIDSIZE = 18
-
-# --- histogram2d bin settings for Plot 4 ----------------------
-# Bins are defined independently per axis so pixel aspect ratio
-# roughly matches the physical bat face (length ~1.15 m, width ~0.30 m).
-# Rule of thumb: N_BINS_Y / N_BINS_Z ≈ BAT length / BAT width ≈ 3.8.
-# Increase bin counts for finer resolution when more data is available.
-N_BINS_Y  = 46   # bins along bat length  (0.25 → −0.90 m, step ≈ 0.025 m)
-N_BINS_Z  = 12   # bins across bat width  (−0.15 → 0.15 m, step ≈ 0.025 m)
 
 # ==============================================================
 
@@ -211,8 +203,8 @@ def format_bat_plot(fig, ax, sc, title: str) -> None:
     """Apply shared axis formatting for all contact-location plots."""
     plt.colorbar(sc, ax=ax, label='xwOBAcon (EV + LA)', fraction=0.05, pad=0.02)
     ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xlabel('Ball Y at Contact (m) [Length of Bat]', fontsize=12)
-    ax.set_ylabel('Ball Z at Contact (m) [Width of Bat]', fontsize=12)
+    ax.set_xlabel('Miss Vector Local Y (m) [Along Bat Length]', fontsize=12)
+    ax.set_ylabel('Miss Vector Local Z (m) [Across Bat Width]', fontsize=12)
     ax.set_xlim(0.25, -0.90)
     ax.set_ylim(-0.15, 0.15)
     ax.set_aspect('equal', adjustable='box')
@@ -235,347 +227,142 @@ print(f"[INFO] Global xwOBAcon range: {VMIN:.3f} – {VMAX:.3f}  (used as shared
 # (Sweet spot and bat geometry constants are defined at the top of the file)
 
 #==============================================
-# Plot 1: All barrel contacts (xwOBAcon >= 0)
+# Population setup
 #==============================================
-fig1, ax1 = plt.subplots(figsize=(14, 4))
-draw_bat_axes(ax1)
-
-sc1 = ax1.scatter(
-    df_merge_clean['BALL_IN_BAT_AT_TMIN_K80_Y'],
-    df_merge_clean['BALL_IN_BAT_AT_TMIN_K80_Z'],
-    c=df_merge_clean['xwobacon_ev_la'],
-    cmap='RdYlGn',
-    vmin=VMIN, vmax=VMAX,   # global scale — consistent across all 3 plots
-    alpha=0.9,
-    s=60,
-    edgecolors='black',
-    linewidth=0.5,
-    label=f'All Contacts (n={len(df_merge_clean)})',
-    zorder=5
-)
-
-format_bat_plot(
-    fig1, ax1, sc1,
-    title=f'Ball Location at MD vs xwOBAcon — All Barrels ({n_games} games)'
-)
-
-fig1.tight_layout()
-fig1.savefig(os.path.join(FIGURES_DIR, 'xwoba_all.png'), dpi=300, bbox_inches='tight')
-print(f"[INFO] Plot 1 saved → xwoba_all.png  (n={len(df_merge_clean)} points)")
-
-#==============================================
-# Plot 2: BALL_CONTACT only (all contact swings)
-# Source is df_merged (all swings) filtered to rows where BALL_CONTACT is set.
-# Contacts WITH xwOBA data are colored by xwOBAcon; contacts WITHOUT xwOBA
-# (no barrel classification) are rendered in neutral gray so no data is hidden.
-#==============================================
-df_contact = df_merged[df_merged['BALL_CONTACT'] == 'BALL_CONTACT'].copy()
-df_contact_xwoba     = df_contact[df_contact['xwobacon_ev_la'].notna()]
-df_contact_no_xwoba  = df_contact[df_contact['xwobacon_ev_la'].isna()]
+df_contact = df_merged[df_merged['OUTCOME'] == 'BALL_CONTACT'].copy()
+# Sort ascending: high-xwOBA points drawn last so they sit on top
+df_contact_xwoba    = df_contact[df_contact['xwobacon_ev_la'].notna()].sort_values('xwobacon_ev_la')
+df_contact_no_xwoba = df_contact[df_contact['xwobacon_ev_la'].isna()]
+df_elite = df_contact[df_contact['xwobacon_ev_la'] >= XWOBA_THRESHOLD].sort_values('xwobacon_ev_la')
+# Filter for quality contact hex maps
+df_hex = df_contact_xwoba[df_contact_xwoba['xwobacon_ev_la'] > HEATMAP_XWOBA_MIN]
 print(
     f"[INFO] BALL_CONTACT rows: {len(df_contact)} total  |  "
     f"{len(df_contact_xwoba)} with xwOBA  |  "
     f"{len(df_contact_no_xwoba)} without xwOBA"
 )
+print(f"[INFO] Elite (xwOBAcon >= {XWOBA_THRESHOLD}): {len(df_elite)}")
+print(f"[INFO] Hex filter (xwOBAcon > {HEATMAP_XWOBA_MIN}): {len(df_hex)}")
 
-fig2, ax2 = plt.subplots(figsize=(14, 4))
-draw_bat_axes(ax2)
 
-# Layer 1 — contacts without xwOBA classification (gray, behind colored points)
-if len(df_contact_no_xwoba):
-    ax2.scatter(
-        df_contact_no_xwoba['BALL_IN_BAT_AT_TMIN_K80_Y'],
-        df_contact_no_xwoba['BALL_IN_BAT_AT_TMIN_K80_Z'],
-        color='#AAAAAA',
-        alpha=0.5,
-        s=40,
-        edgecolors='none',
-        label=f'Contact — no xwOBA (n={len(df_contact_no_xwoba)})',
-        zorder=4
+#==============================================
+# Shared hex helper
+# All hex plots share this function to stay DRY.
+# Only the source dataframe, title, and filename differ.
+#==============================================
+def draw_hex_bat_plot(df_plot, title: str, filename: str) -> None:
+    """
+    Hexbin mean-xwOBAcon plot with bat outline and sweet spot overlay.
+    Each hexagon shows the mean xwOBA of contacts whose miss-vector
+    local (Y, Z) position fell inside it. Empty bins are hidden (mincnt=1).
+    linewidths=0 removes borders so adjacent cells blend smoothly.
+    """
+    fig, ax = plt.subplots(figsize=(14, 4), facecolor='white')
+    ax.set_facecolor('white')
+    ax.grid(False)
+
+    hb = ax.hexbin(
+        df_plot['MISS_VECTOR_LOCAL_Y'],
+        df_plot['MISS_VECTOR_LOCAL_Z'],
+        C=df_plot['xwobacon_ev_la'],
+        reduce_C_function=np.nanmean,   # mean xwOBA per bin
+        gridsize=HEX_GRIDSIZE,
+        cmap='RdYlGn',
+        vmin=VMIN, vmax=VMAX,           # global colour scale — consistent across all plots
+        mincnt=1,                       # hide empty bins
+        linewidths=0,                   # borderless for smooth gradient look
+        zorder=2,
     )
 
-# Layer 2 — contacts with xwOBA classification (colored, on top)
-sc2 = ax2.scatter(
-    df_contact_xwoba['BALL_IN_BAT_AT_TMIN_K80_Y'],
-    df_contact_xwoba['BALL_IN_BAT_AT_TMIN_K80_Z'],
+    # Bat outline on top so it frames the data
+    ax.add_patch(build_bat_polygon(facecolor='none', alpha=1.0))
+    ax.axvline(x=BAT_TIP_X,     color='#444', linestyle='--', linewidth=1.0, alpha=0.5)
+    ax.axvline(x=BAT_KNOB_X,    color='#444', linestyle='--', linewidth=1.0, alpha=0.5)
+    ax.axhline(y= BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
+    ax.axhline(y=-BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
+    ax.axvline(x=SS_ORIGIN_Y, color='crimson', linestyle=':', linewidth=2, alpha=0.8,
+               label=f'80% Sweet Spot (Y={SS_ORIGIN_Y} m)')
+    ax.add_patch(Ellipse(
+        xy=(SS_ORIGIN_Y, SS_ORIGIN_Z),
+        width=2 * SS_SEMI_MAJOR, height=2 * SS_SEMI_MINOR,
+        facecolor='none', edgecolor='crimson', linestyle='-', linewidth=2.0,
+        label=f'Target Zone (±{SS_SEMI_MAJOR}×±{SS_SEMI_MINOR} m)', zorder=6,
+    ))
+
+    plt.colorbar(hb, ax=ax, label='Mean xwOBAcon (EV + LA)', fraction=0.05, pad=0.02)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('Miss Vector Local Y (m) [Along Bat Length]', fontsize=12)
+    ax.set_ylabel('Miss Vector Local Z (m) [Across Bat Width]', fontsize=12)
+    ax.set_xlim(0.25, -0.90)
+    ax.set_ylim(-0.15, 0.15)
+    ax.set_aspect('equal', adjustable='box')
+    ax.legend(loc='upper left', bbox_to_anchor=(1.15, 1))
+
+    fig.tight_layout()
+    out = os.path.join(FIGURES_DIR, filename)
+    fig.savefig(out, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"[INFO] Saved → {filename}  (n={len(df_plot)})")
+
+
+#==============================================
+# Plot 1 (DOT): All BALL_CONTACT — gray for no xwOBA, colored for scored contacts
+# This is the only scatter plot; all other plots are hexbin.
+# High-xwOBA points sorted to top so the quality-contact centre is visible.
+#==============================================
+fig1, ax1 = plt.subplots(figsize=(14, 4))
+draw_bat_axes(ax1)
+
+if len(df_contact_no_xwoba):
+    ax1.scatter(
+        df_contact_no_xwoba['MISS_VECTOR_LOCAL_Y'],
+        df_contact_no_xwoba['MISS_VECTOR_LOCAL_Z'],
+        color='#AAAAAA', alpha=0.45, s=35, edgecolors='none',
+        label=f'Contact — no xwOBA (n={len(df_contact_no_xwoba)})', zorder=4,
+    )
+
+sc1 = ax1.scatter(
+    df_contact_xwoba['MISS_VECTOR_LOCAL_Y'],
+    df_contact_xwoba['MISS_VECTOR_LOCAL_Z'],
     c=df_contact_xwoba['xwobacon_ev_la'],
-    cmap='RdYlGn',
-    vmin=VMIN, vmax=VMAX,   # global scale — consistent across all 3 plots
-    alpha=0.9,
-    s=60,
-    edgecolors='black',
-    linewidth=0.5,
-    label=f'Contact + xwOBA (n={len(df_contact_xwoba)})',
-    zorder=5
+    cmap='RdYlGn', vmin=VMIN, vmax=VMAX,
+    alpha=0.9, s=55, edgecolors='black', linewidth=0.5,
+    label=f'Contact + xwOBA (n={len(df_contact_xwoba)})', zorder=5,
 )
 
-format_bat_plot(
-    fig2, ax2, sc2,
-    title=f'Ball Location at MD — BALL_CONTACT Only ({n_games} games)'
-)
+format_bat_plot(fig1, ax1, sc1,
+    title=f'All Ball Contacts — Dot Plot  ({n_games} games, n={len(df_contact)})')
+fig1.tight_layout()
+fig1.savefig(os.path.join(FIGURES_DIR, 'xwoba_dot_all_contacts.png'), dpi=300, bbox_inches='tight')
+plt.close(fig1)
+print(f"[INFO] Plot 1 (dot) saved → xwoba_dot_all_contacts.png  (n={len(df_contact)})")
 
-fig2.tight_layout()
-fig2.savefig(os.path.join(FIGURES_DIR, 'xwoba_ball_contact_only.png'), dpi=300, bbox_inches='tight')
-print(f"[INFO] Plot 2 saved → xwoba_ball_contact_only.png  (n={len(df_contact)} points)")
 
 #==============================================
-# Plot 3: xwOBAcon >= 1.0 filter — same global color scale as Plots 1 & 2
-# Points below 1.0 are excluded entirely (not shown, not grayed).
-# vmin/vmax stay locked to the dataset-wide range so a green point here
-# is the exact same shade of green as on Plots 1 and 2.
+# Plot 2 (HEX): All contacts with xwOBA — full range, no floor filter
 #==============================================
-# XWOBA_THRESHOLD is defined in the global constants block at the top of the file.
-# Start from df_contact (BALL_CONTACT rows only) then apply the threshold,
-# so Plot 3 is the intersection: contacted the ball AND xwOBAcon >= XWOBA_THRESHOLD.
-df_elite = df_contact[df_contact['xwobacon_ev_la'] >= XWOBA_THRESHOLD].copy()
-print(f"[INFO] Elite contacts (xwOBAcon >= {XWOBA_THRESHOLD}): {len(df_elite)} / {len(df_merge_clean)} barrel rows")
-
-fig3, ax3 = plt.subplots(figsize=(14, 4))
-draw_bat_axes(ax3)
-
-sc3 = ax3.scatter(
-    df_elite['BALL_IN_BAT_AT_TMIN_K80_Y'],
-    df_elite['BALL_IN_BAT_AT_TMIN_K80_Z'],
-    c=df_elite['xwobacon_ev_la'],
-    cmap='RdYlGn',
-    vmin=VMIN, vmax=VMAX,   # global scale — do NOT re-anchor at threshold
-    alpha=0.9,
-    s=60,
-    edgecolors='black',
-    linewidth=0.5,
-    label=f'xwOBAcon ≥ {XWOBA_THRESHOLD} (n={len(df_elite)})',
-    zorder=5
-)
-
-# Target ellipse — all values pulled from the global constants block.
-# xy center: (SS_ORIGIN_Y, SS_ORIGIN_Z) — positioned along and above the bat centreline.
-# Ellipse width/height are full diameters, so multiply each semi-axis by 2.
-sweet_spot_ellipse = Ellipse(
-    xy=(SS_ORIGIN_Y, SS_ORIGIN_Z),
-    width=2 * SS_SEMI_MAJOR,
-    height=2 * SS_SEMI_MINOR,
-    angle=0,
-    facecolor='none',
-    edgecolor='red',
-    linestyle='-',
-    linewidth=2.0,
-    label=(
-        f'Target Zone  Y={SS_ORIGIN_Y} m, Z={SS_ORIGIN_Z} m  '
-        f'(±{SS_SEMI_MAJOR} × ±{SS_SEMI_MINOR} m)'
-    ),
-    zorder=6,
-)
-ax3.add_patch(sweet_spot_ellipse)
-
-format_bat_plot(
-    fig3, ax3, sc3,
-    title=f'Ball Contact Location — xwOBAcon ≥ {XWOBA_THRESHOLD} ({n_games} games)'
-)
-
-fig3.tight_layout()
-fig3.savefig(os.path.join(FIGURES_DIR, 'xwoba_contact_gte1.png'), dpi=300, bbox_inches='tight')
-print(f"[INFO] Plot 3 saved → xwoba_contact_gte1.png  (n={len(df_elite)} points)")
-
-#==============================================
-# Plot 4: 2-D histogram heat map — mean xwOBAcon per rectangular spatial bin
-# Source: df_contact (all BALL_CONTACT rows that have xwOBAcon values).
-#
-# Approach: np.histogram2d (weighted sum) ÷ np.histogram2d (counts) = per-bin mean.
-# Bins are defined independently on each axis so pixel aspect ratio matches
-# the physical bat face — avoids the hexagon distortion from hexbin on an
-# elongated equal-aspect plot. See:
-# https://stackoverflow.com/a/65085993
-#
-# Contacts without xwOBA (NaN) are silently dropped by .dropna() before
-# binning so they never contribute to a bin's weighted sum or count.
-#==============================================
-
-# --- Build bin edges from global axis extents -------------------------
-# histogram2d requires monotonically INCREASING edges — always go low → high.
-# The visual axis reversal (bat tip on left, knob on right) is handled later
-# via ax4.set_xlim(0.25, -0.90) which flips the display without touching the bins.
-y_edges = np.linspace(-0.90,  0.25, N_BINS_Y + 1)   # bat length axis (Y), low→high
-z_edges = np.linspace(-0.15,  0.15, N_BINS_Z + 1)   # bat width  axis (Z)
-
-# --- Drop rows without xwOBA, then apply floor filter -----------------
-# Step 1: remove contacts with no barrel classification (NaN xwOBA).
-# Step 2: keep only contacts at or above HEATMAP_XWOBA_MIN so the heat map
-#         highlights quality contact zones rather than averaging in weak hits.
-df_hex = df_contact.dropna(subset=['xwobacon_ev_la']).copy()
-df_hex = df_hex[df_hex['xwobacon_ev_la'] > HEATMAP_XWOBA_MIN]
-print(
-    f"[INFO] Plot 4 — contacts with xwOBAcon > {HEATMAP_XWOBA_MIN}: "
-    f"{len(df_hex)} / {len(df_contact)} total contacts"
-)
-
-y_vals = df_hex['BALL_IN_BAT_AT_TMIN_K80_Y'].values
-z_vals = df_hex['BALL_IN_BAT_AT_TMIN_K80_Z'].values
-w_vals = df_hex['xwobacon_ev_la'].values
-
-# Weighted sum of xwOBA per bin
-H_sum, _, _ = np.histogram2d(y_vals, z_vals, bins=[y_edges, z_edges], weights=w_vals)
-# Count of contacts per bin
-H_cnt, _, _ = np.histogram2d(y_vals, z_vals, bins=[y_edges, z_edges])
-
-# Mean = sum / count; bins with zero contacts → NaN (imshow renders as blank)
-with np.errstate(invalid='ignore'):   # suppress "divide by zero" for empty bins
-    H_mean = H_sum / H_cnt
-    H_mean[H_cnt == 0] = np.nan
-
-# --- Plot ---------------------------------------------------------------
-fig4, ax4 = plt.subplots(figsize=(14, 4))
-
-# imshow: transpose so rows = Z axis, columns = Y axis.
-# origin='lower' keeps Z increasing upward.
-# extent aligns pixel edges with data coordinates.
-im = ax4.imshow(
-    H_mean.T,
-    origin='lower',
-    aspect='auto',                      # fills the axes without equal-aspect distortion
-    cmap='RdYlGn',
-    vmin=VMIN, vmax=VMAX,               # shared global colour scale
-    extent=[y_edges[0], y_edges[-1], z_edges[0], z_edges[-1]],
-    zorder=2,
-    interpolation='nearest',            # nearest-neighbour keeps bin boundaries crisp
-)
-
-# Bat outline only — facecolor='none' so the heat map shows through
-ax4.add_patch(build_bat_polygon(facecolor='none', alpha=1.0))
-ax4.axvline(x=BAT_TIP_X,    color='black', linestyle='--', linewidth=1.0, alpha=0.5)
-ax4.axvline(x=BAT_KNOB_X,   color='black', linestyle='--', linewidth=1.0, alpha=0.5)
-ax4.axhline(y= BAT_BARREL_R, color='gray',  linestyle='--', linewidth=0.8, alpha=0.4)
-ax4.axhline(y=-BAT_BARREL_R, color='gray',  linestyle='--', linewidth=0.8, alpha=0.4)
-ax4.axvline(
-    x=SS_ORIGIN_Y, color='red', linestyle=':', linewidth=2, alpha=0.7,
-    label=f'80 % Sweet Spot (Y={SS_ORIGIN_Y} m)'
-)
-
-# Target ellipse — same global constants as Plots 3
-ax4.add_patch(Ellipse(
-    xy=(SS_ORIGIN_Y, SS_ORIGIN_Z),
-    width=2 * SS_SEMI_MAJOR,
-    height=2 * SS_SEMI_MINOR,
-    angle=0,
-    facecolor='none',
-    edgecolor='red',
-    linestyle='-',
-    linewidth=2.0,
-    label=(
-        f'Target Zone  Y={SS_ORIGIN_Y} m, Z={SS_ORIGIN_Z} m  '
-        f'(±{SS_SEMI_MAJOR}×±{SS_SEMI_MINOR} m)'
-    ),
-    zorder=6,
-))
-
-plt.colorbar(im, ax=ax4, label='Mean xwOBAcon per bin (EV + LA)', fraction=0.05, pad=0.02)
-ax4.set_title(
-    f'Mean xwOBAcon Heat Map — xwOBAcon > {HEATMAP_XWOBA_MIN}  '
-    f'({n_games} games, {N_BINS_Y}×{N_BINS_Z} bins)',
-    fontsize=14, fontweight='bold'
-)
-ax4.set_xlabel('Ball Y at Contact (m) [Length of Bat]', fontsize=12)
-ax4.set_ylabel('Ball Z at Contact (m) [Width of Bat]', fontsize=12)
-ax4.set_xlim(0.25, -0.90)
-ax4.set_ylim(-0.15, 0.15)
-ax4.set_aspect('equal', adjustable='box')
-ax4.legend(loc='upper left', bbox_to_anchor=(1.15, 1))
-
-fig4.tight_layout()
-fig4.savefig(os.path.join(FIGURES_DIR, 'xwoba_contact_heatmap.png'), dpi=300, bbox_inches='tight')
-print(
-    f"[INFO] Plot 4 saved → xwoba_contact_heatmap.png  "
-    f"(n={len(df_hex)} rows, xwOBAcon > {HEATMAP_XWOBA_MIN}, {N_BINS_Y}×{N_BINS_Z} bins)"
+draw_hex_bat_plot(
+    df_contact_xwoba,
+    title=f'Mean xwOBAcon Hex Map — All Scored Contacts  ({n_games} games, n={len(df_contact_xwoba)}, gridsize={HEX_GRIDSIZE})',
+    filename='xwoba_hex_all_barrels.png',
 )
 
 #==============================================
-# Plot 5: hexbin heat map — mean xwOBAcon per hexagonal spatial bin
-# Source: same df_hex used for Plot 4 (xwOBAcon > HEATMAP_XWOBA_MIN).
-#
-# hexbin with C= and reduce_C_function=np.nanmean is the matplotlib-native
-# approach — no manual binning required. Each hexagon shows the mean xwOBA
-# of all contacts whose (Y, Z) coordinate fell inside it.
-# mincnt=1 hides empty hex cells (renders as background rather than zero).
-#
-# Note: hexagons distort on equal-aspect elongated axes vs the rectangular
-# bins in Plot 4 — both are kept so the approaches can be compared directly.
-# Adjust HEX_GRIDSIZE in the global constants block to change resolution.
+# Plot 3 (HEX): Elite contacts — xwOBAcon >= XWOBA_THRESHOLD
 #==============================================
-# White canvas so the sequential colourmap fades cleanly to background
-fig5, ax5 = plt.subplots(figsize=(14, 4), facecolor='white')
-ax5.set_facecolor('white')
-
-# Remove the seaborn grid lines for this plot — the smooth hex aesthetic
-# is cleaner on a plain white background with no competing grid lines.
-ax5.grid(False)
-
-# hexbin: linewidths=0 removes the borders between hexagons so adjacent
-# cells blend smoothly — this is the primary change that creates the
-# gradient-fade look seen in the reference image.
-# cmap='YlGn' is a sequential single-hue map (light → dark) which reads
-# naturally as "more/better" and fades to white at the floor value — same
-# visual language as the reference. RdYlGn is used on Plots 1–3 for
-# diverging good/bad signal; here a sequential map is more appropriate
-# because after the HEATMAP_XWOBA_MIN filter all values are already "good".
-hb = ax5.hexbin(
-    df_hex['BALL_IN_BAT_AT_TMIN_K80_Y'],
-    df_hex['BALL_IN_BAT_AT_TMIN_K80_Z'],
-    C=df_hex['xwobacon_ev_la'],       # z-values averaged within each hex bin
-    reduce_C_function=np.nanmean,     # mean xwOBA per bin; NaN contacts excluded
-    gridsize=HEX_GRIDSIZE,            # set in global constants block
-    cmap='RdYlGn',                    # diverging red→yellow→green; matches Plots 1–3
-    vmin=VMIN,                        # global dataset minimum — same scale as Plots 1–3
-    vmax=VMAX,                        # top of global xwOBA range
-    mincnt=1,                         # hide empty hex cells (show as white background)
-    linewidths=0,                     # no borders → smooth gradient between cells
-    zorder=2,
+draw_hex_bat_plot(
+    df_elite,
+    title=f'Mean xwOBAcon Hex Map — xwOBAcon ≥ {XWOBA_THRESHOLD}  ({n_games} games, n={len(df_elite)}, gridsize={HEX_GRIDSIZE})',
+    filename='xwoba_hex_elite.png',
 )
 
-# Bat outline drawn after hexbin so it sits on top of the heat map
-ax5.add_patch(build_bat_polygon(facecolor='none', alpha=1.0))
-ax5.axvline(x=BAT_TIP_X,    color='#444444', linestyle='--', linewidth=1.0, alpha=0.5)
-ax5.axvline(x=BAT_KNOB_X,   color='#444444', linestyle='--', linewidth=1.0, alpha=0.5)
-ax5.axhline(y= BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
-ax5.axhline(y=-BAT_BARREL_R, color='gray', linestyle='--', linewidth=0.8, alpha=0.4)
-ax5.axvline(
-    x=SS_ORIGIN_Y, color='crimson', linestyle=':', linewidth=2, alpha=0.8,
-    label=f'80 % Sweet Spot (Y={SS_ORIGIN_Y} m)'
-)
-
-# Target ellipse — same global parameters as Plots 3 and 4
-ax5.add_patch(Ellipse(
-    xy=(SS_ORIGIN_Y, SS_ORIGIN_Z),
-    width=2 * SS_SEMI_MAJOR,
-    height=2 * SS_SEMI_MINOR,
-    angle=0,
-    facecolor='none',
-    edgecolor='crimson',
-    linestyle='-',
-    linewidth=2.0,
-    label=(
-        f'Target Zone  Y={SS_ORIGIN_Y} m, Z={SS_ORIGIN_Z} m  '
-        f'(±{SS_SEMI_MAJOR}×±{SS_SEMI_MINOR} m)'
-    ),
-    zorder=6,
-))
-
-plt.colorbar(hb, ax=ax5, label='Mean xwOBAcon per bin (EV + LA)', fraction=0.05, pad=0.02)
-ax5.set_title(
-    f'Mean xwOBAcon Hex Map — xwOBAcon > {HEATMAP_XWOBA_MIN}  '
-    f'({n_games} games, gridsize={HEX_GRIDSIZE})',
-    fontsize=14, fontweight='bold'
-)
-ax5.set_xlabel('Ball Y at Contact (m) [Length of Bat]', fontsize=12)
-ax5.set_ylabel('Ball Z at Contact (m) [Width of Bat]', fontsize=12)
-ax5.set_xlim(0.25, -0.90)
-ax5.set_ylim(-0.15, 0.15)
-ax5.set_aspect('equal', adjustable='box')
-ax5.legend(loc='upper left', bbox_to_anchor=(1.15, 1))
-
-fig5.tight_layout()
-fig5.savefig(os.path.join(FIGURES_DIR, 'xwoba_contact_hexbin.png'), dpi=300, bbox_inches='tight')
-print(
-    f"[INFO] Plot 5 saved → xwoba_contact_hexbin.png  "
-    f"(n={len(df_hex)} rows, xwOBAcon > {HEATMAP_XWOBA_MIN}, gridsize={HEX_GRIDSIZE})"
+#==============================================
+# Plot 4 (HEX): Quality filter — xwOBAcon > HEATMAP_XWOBA_MIN (default 0.6)
+#==============================================
+draw_hex_bat_plot(
+    df_hex,
+    title=f'Mean xwOBAcon Hex Map — xwOBAcon > {HEATMAP_XWOBA_MIN}  ({n_games} games, n={len(df_hex)}, gridsize={HEX_GRIDSIZE})',
+    filename='xwoba_hex_filtered.png',
 )
 
 plt.show()

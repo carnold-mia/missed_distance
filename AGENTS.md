@@ -1,7 +1,7 @@
 <claude-mem-context>
 # Memory Context
 
-# $CMEM Missed Distance Pipeline 2026-05-22 2:42pm EDT
+# $CMEM biomech-barrel-miss-distance 2026-05-28 9:58pm EDT
 
 No previous sessions found.
 </claude-mem-context>

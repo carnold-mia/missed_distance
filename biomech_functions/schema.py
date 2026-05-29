@@ -19,23 +19,20 @@ class OutputSchema:
 
     def metric_keys(self, spot: str, space: str) -> list[str]:
         keys = [
-            f"T_MIN_{space}_{spot}",
-            f"MISSED_DISTANCE_{space}_{spot}",
+            f"T_MIN_{space}",
+            f"MISSED_DISTANCE_{space}",
         ]
-        keys += [f"MISS_VECTOR_{space}_{spot}_{axis}" for axis in self.axes]
-        keys += [f"MISS_VECTOR_VELOCITY_{space}_{spot}_{axis}" for axis in self.axes]
+        keys += [f"MISS_VECTOR_{space}_{axis}" for axis in self.axes]
+        keys += [f"MISS_VELOCITY_{space}_{axis}" for axis in self.axes]
         keys += [
-            f"MISSED_DISTANCE_{space}_{spot}_SPEED_AT_TMIN",
+            f"MISS_SPEED_{space}_AT_TMIN",
         ]
 
         if space == "GLOBAL":
-            keys += [f"BALL_AT_TMIN_{spot}_{axis}" for axis in self.axes]
-            keys += [f"BAT_KNOB_AT_TMIN_{spot}_{axis}" for axis in self.axes]
-            keys += [f"BAT_TOP_AT_TMIN_{spot}_{axis}" for axis in self.axes]
-            keys += [f"SS_{spot}_AT_TMIN_{axis}" for axis in self.axes]
-        else:
-            keys += [f"BALL_IN_BAT_AT_TMIN_{spot}_{axis}" for axis in self.axes]
-            keys += [f"BAT_TOP_IN_BAT_AT_TMIN_{spot}_{axis}" for axis in self.axes]
+            keys += [f"BALL_AT_TMIN_{axis}" for axis in self.axes]
+            keys += [f"BAT_KNOB_AT_TMIN_{axis}" for axis in self.axes]
+            keys += [f"BAT_TOP_AT_TMIN_{axis}" for axis in self.axes]
+            keys += [f"SWEET_SPOT_ORIGIN_AT_TMIN_{axis}" for axis in self.axes]
         return keys
 
     def time_series_columns(
@@ -50,24 +47,19 @@ class OutputSchema:
         desired += [f"BAT_KNOB_{axis}" for axis in self.axes]
         desired += [f"BAT_TOP_{axis}" for axis in self.axes]
 
-        for spot in self.sweet_spots:
-            desired += [f"SS_{spot}_{axis}" for axis in self.axes]
+        desired += [f"K80_{axis}" for axis in self.axes]
+        desired += [f"SWEET_SPOT_ORIGIN_{axis}" for axis in self.axes]
+
+        desired += [f"MISS_VECTOR_GLOBAL_{axis}" for axis in self.axes]
 
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                desired += [f"MISS_VECTOR_{space}_{spot}_{axis}" for axis in self.axes]
+            desired.append(f"MISSED_DISTANCE_{space}")
 
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                desired.append(f"MISSED_DISTANCE_{space}_{spot}")
+            desired += [f"MISS_VELOCITY_{space}_{axis}" for axis in self.axes]
 
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                desired += [f"MISS_VECTOR_VELOCITY_{space}_{spot}_{axis}" for axis in self.axes]
-
-        for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                desired.append(f"MISSED_DISTANCE_{space}_{spot}_SPEED")
+            desired.append(f"MISS_SPEED_{space}")
 
         desired += list(foot_ankle_cols)
         return desired
@@ -76,58 +68,45 @@ class OutputSchema:
         self,
         start_position_cols: Iterable[str],
     ) -> list[str]:
-        event_cols = [col for col in self.events if not col.startswith("BALL_MIN")]
-        ball_min_cols = [col for col in self.events if col.startswith("BALL_MIN")]
+        event_cols = [col for col in self.events if not col.startswith("KT_BALL_MIN")]
+        ball_min_cols = [col for col in self.events if col.startswith("KT_BALL_MIN")]
 
         tmin_cols: list[str] = []
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                tmin_cols.append(f"T_MIN_{space}_{spot}")
+            tmin_cols.append(f"T_MIN_{space}")
 
         tmin_position_cols: list[str] = []
-        for spot in self.sweet_spots:
-            tmin_position_cols += [
-                f"BALL_IN_BAT_AT_TMIN_{spot}_{axis}" for axis in self.axes
-            ]
-            tmin_position_cols += [
-                f"BAT_TOP_IN_BAT_AT_TMIN_{spot}_{axis}" for axis in self.axes
-            ]
-        for spot in self.sweet_spots:
-            tmin_position_cols += [
-                f"BALL_AT_TMIN_{spot}_{axis}" for axis in self.axes
-            ]
-            tmin_position_cols += [
-                f"BAT_KNOB_AT_TMIN_{spot}_{axis}" for axis in self.axes
-            ]
-            tmin_position_cols += [
-                f"BAT_TOP_AT_TMIN_{spot}_{axis}" for axis in self.axes
-            ]
-            tmin_position_cols += [
-                f"SS_{spot}_AT_TMIN_{axis}" for axis in self.axes
-            ]
+        tmin_position_cols += [
+            f"BALL_AT_TMIN_{axis}" for axis in self.axes
+        ]
+        tmin_position_cols += [
+            f"BAT_KNOB_AT_TMIN_{axis}" for axis in self.axes
+        ]
+        tmin_position_cols += [
+            f"BAT_TOP_AT_TMIN_{axis}" for axis in self.axes
+        ]
+        tmin_position_cols += [
+            f"SWEET_SPOT_ORIGIN_AT_TMIN_{axis}" for axis in self.axes
+        ]
 
         miss_vector_cols: list[str] = []
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                miss_vector_cols += [f"MISS_VECTOR_{space}_{spot}_{axis}" for axis in self.axes]
+            miss_vector_cols += [f"MISS_VECTOR_{space}_{axis}" for axis in self.axes]
 
         distance_cols: list[str] = []
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                distance_cols.append(f"MISSED_DISTANCE_{space}_{spot}")
+            distance_cols.append(f"MISSED_DISTANCE_{space}")
 
         max_velocity_cols: list[str] = []
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                max_velocity_cols += [
-                    f"MAX_MISS_VELOCITY_{spot}_{space}_{axis}"
-                    for axis in self.axes
-                ]
+            max_velocity_cols += [
+                f"MAX_MISS_VELOCITY_{space}_{axis}"
+                for axis in self.axes
+            ]
 
         max_speed_cols: list[str] = []
         for space in self.spaces_local_global:
-            for spot in self.sweet_spots:
-                max_speed_cols.append(f"MAX_MISS_SPEED_{spot}_{space}")
+            max_speed_cols.append(f"MAX_MISS_SPEED_{space}")
 
         return [
             *self.metadata,
@@ -162,7 +141,7 @@ OUTPUT_SCHEMA = OutputSchema(
         "PLAYER_JERSEY_NUMBER",
         "TEAM_NAME",
         "BATTER_NAME",
-        "HANDEDNESS",
+        "HITTER_HANDEDNESS",
         "HEIGHT",
         "MASS",
         "MAX_BAT_SPEED_MPH",
@@ -175,19 +154,12 @@ OUTPUT_SCHEMA = OutputSchema(
     local_miss_direction_flags=(
         "CAPPED",
         "JAMMED",
-        "OVER",
-        "UNDER",
+        "SWUNG_OVER",
+        "SWUNG_UNDER",
     ),
     tags=(
         "OUTCOME",
-        "BAD",
-        "R",
-        "TAKE",
-        "SWING",
-        "MISS",
-        "BALL_CONTACT",
-        "CHECK_SWING",
-        "IN_BAND_K80",
+        "IN_SWEET_SPOT_ZONE",
     ),
     events=(
         "LOAD",
@@ -197,8 +169,8 @@ OUTPUT_SCHEMA = OutputSchema(
         "DS",
         "BALL_START",
         "BAT_START",
-        "BALL_MIN",
-        "BALL_MIN_DIST_MISS",
+        "KT_BALL_MIN_FRAME",
+        "KT_BALL_MIN_DIST_MISS",
         "BAT_STOP",
     ),
 )
